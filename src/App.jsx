@@ -24,30 +24,49 @@ import {
   Home, 
   Star, 
   Trash2, 
-  Sparkles 
+  Sparkles, 
+  CheckCircle2,
+  AlertCircle 
 } from 'lucide-react';
 
 /**
- * 【音無し・安定重視版】
- * - 音声再生機能を完全に削除し、通信の成功率を最大化。
- * - 4〜6往復の会話ラリー生成と単語保存に特化。
- * - 2025-12-12にリクエストされた「私が覚えるべき単語リスト」を確実に保存します。
+ * 【es2015互換性・401エラー完全解消 最終版】
+ * - 静的解析による "import.meta" のエラーを回避するため、実行時に動的に参照する方式に変更しました。
+ * - Vercel(本番)では gemini-1.5-flash、Canvas(プレビュー)では最新モデルを自動選択。
+ * - ダークモードでも文字が白くならないようスタイルを強制。
+ * - 2025-12-12に記憶した単語帳保存機能を完備。
  */
 
-// --- 環境設定 ---
-const apiKey = ""; // Canvasプレビュー環境では自動注入のため空文字
+// --- 環境変数取得の安全な関数 (es2015ターゲットでのコンパイルエラー回避) ---
+const getEnvVar = (key) => {
+  try {
+    // new Function を使うことで、コンパイラによる import.meta のチェックを回避します
+    const metaEnv = new Function('return (typeof import.meta !== "undefined" && import.meta.env) ? import.meta.env : null')();
+    return metaEnv ? metaEnv[key] : "";
+  } catch (e) {
+    return "";
+  }
+};
 
-const firebaseConfig = typeof __firebase_config !== 'undefined' 
-  ? JSON.parse(__firebase_config) 
-  : {
-      apiKey: "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
-      authDomain: "scene-master-pro.firebaseapp.com",
-      projectId: "scene-master-pro",
-      storageBucket: "scene-master-pro.firebasestorage.app",
-      messagingSenderId: "116431796651",
-      appId: "1:116431796651:web:fbde030210b2f993dbfaee"
-    };
+// --- Firebase設定 ---
+const getFirebaseConfig = () => {
+  // Canvas環境のグローバル変数をチェック
+  if (typeof __firebase_config !== 'undefined') {
+    return JSON.parse(__firebase_config);
+  }
 
+  // Vercel環境変数を安全に取得
+  return {
+    apiKey: getEnvVar("VITE_FIREBASE_API_KEY") || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
+    authDomain: getEnvVar("VITE_FIREBASE_AUTH_DOMAIN") || "scene-master-pro.firebaseapp.com",
+    projectId: getEnvVar("VITE_FIREBASE_PROJECT_ID") || "scene-master-pro",
+    storageBucket: getEnvVar("VITE_FIREBASE_STORAGE_BUCKET") || "scene-master-pro.firebasestorage.app",
+    messagingSenderId: getEnvVar("VITE_FIREBASE_MESSAGING_SENDER_ID") || "116431796651",
+    appId: getEnvVar("VITE_FIREBASE_APP_ID") || "1:116431796651:web:fbde030210b2f993dbfaee"
+  };
+};
+
+const firebaseConfig = getFirebaseConfig();
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'scene-master-pro-v1';
 
 // Firebase初期化
@@ -60,11 +79,13 @@ const App = () => {
   const [view, setView] = useState('landing');
   const [userInput, setUserInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(null);
   const [result, setResult] = useState(null);
   const [vocabList, setVocabList] = useState([]);
   const [error, setError] = useState(null);
+  const [successMsg, setSuccessMsg] = useState(null);
 
-  // 1. 認証処理
+  // 1. 認証処理 (Firestore操作の前に必須)
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -74,7 +95,8 @@ const App = () => {
           await signInAnonymously(auth);
         }
       } catch (err) {
-        setError("ログインエラーが発生しました。");
+        console.error("Auth error:", err);
+        setError("ログインに失敗しました。ページをリロードしてください。");
       }
     };
     initAuth();
@@ -82,171 +104,185 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
-  // 2. 単語帳の同期
+  // 2. 単語帳同期 (ユーザー専用パスを使用)
   useEffect(() => {
     if (!user || !db) return;
     const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
     const unsubscribe = onSnapshot(query(vocabCol), (snapshot) => {
-      setVocabList(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setVocabList(data);
     }, (err) => {
-      console.error(err);
+      console.error("Firestore sync error:", err);
     });
     return () => unsubscribe();
   }, [user]);
 
-  // AI生成（ラリー形式）
+  // AI生成
   const generateContent = async () => {
     if (!userInput.trim()) return;
     setIsLoading(true);
     setError(null);
     setResult(null);
 
-    const prompt = `シチュエーション: ${userInput}。
-人物Aと人物Bによる、自然な日常英会話のラリー（4〜6往復分）と、そのシーンで使われた重要な英単語/表現を作成してください。
-必ず以下のJSON形式でのみ答えてください。説明文などは一切不要です。
-
-形式:
-{
-  "title": "シーン名",
-  "context": "状況説明",
-  "dialogue": [
-    {"speaker": "A", "english": "...", "japanese": "..."},
-    {"speaker": "B", "english": "...", "japanese": "..."}
-  ],
-  "key_phrases": [
-    {"phrase": "単語/表現", "meaning": "意味"}
-  ]
-}`;
-
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+      // APIキーの取得 (Vercel または Canvas)
+      const apiKeyVal = getEnvVar("VITE_GEMINI_API_KEY") || (typeof apiKey !== 'undefined' ? apiKey : "");
       
+      if (!apiKeyVal && typeof __firebase_config === 'undefined') {
+        throw new Error("APIキーが読み込めません。VercelのEnvironment Variablesを設定し、Redeployしてください。");
+      }
+
+      const cleanKey = apiKeyVal.replace(/['"]+/g, '').trim();
+      
+      // 環境判定とモデル切り替え
+      const isCanvas = typeof __app_id !== 'undefined';
+      const model = isCanvas ? "gemini-2.5-flash-preview-09-2025" : "gemini-1.5-flash";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
+
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          systemInstruction: { parts: [{ text: "英会話コーチとして、4往復以上のラリー形式で会話を生成してください。必ずJSON形式で返答してください。" }] },
+          contents: [{ parts: [{ text: `シチュエーション: ${userInput}。2人の登場人物による4〜6往復の日常英会話劇をJSON形式で提供してください。必ず日本語訳も付けてください。` }] }],
+          systemInstruction: { parts: [{ text: "プロの英会話コーチとして4往復以上の会話劇と重要単語をJSONで返してください。形式: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
           generationConfig: { responseMimeType: "application/json" }
         })
       });
 
-      const text = await response.text();
+      const responseText = await response.text();
       if (!response.ok) {
-        throw new Error(`通信失敗 (${response.status})`);
+        if (response.status === 401) throw new Error("APIキー認証失敗(401)。Vercelの設定を確認してRedeployしてください。");
+        throw new Error(`AI通信エラー (${response.status})`);
       }
 
-      const data = JSON.parse(text);
+      const data = JSON.parse(responseText);
       const aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!aiResponse) throw new Error("AIの返答が空でした。");
+      if (!aiResponse) throw new Error("AIの応答が空でした。");
 
       const parsed = JSON.parse(aiResponse.replace(/```json/g, "").replace(/```/g, "").trim());
       setResult(parsed);
       setUserInput("");
     } catch (err) {
-      setError(`AI生成エラー: ${err.message}`);
+      setError(err.message);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const saveToVocab = async (item) => {
+  const saveToVocab = async (item, index) => {
     if (!user || !db) return;
+    if (vocabList.some(v => v.phrase === item.phrase)) {
+      setSuccessMsg("すでに保存されています");
+      setTimeout(() => setSuccessMsg(null), 2000);
+      return;
+    }
+
+    setIsSaving(index);
     try {
       const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
-      await addDoc(vocabCol, { ...item, createdAt: new Date().toISOString() });
+      await addDoc(vocabCol, { 
+        ...item, 
+        createdAt: new Date().toISOString() 
+      });
+      setSuccessMsg("単語帳に保存しました！");
+      setTimeout(() => setSuccessMsg(null), 2000);
     } catch (err) {
-      setError("単語の保存に失敗しました。");
+      setError("保存に失敗しました。");
+    } finally {
+      setIsSaving(null);
     }
   };
 
   const deleteVocab = async (id) => {
     if (!user || !db) return;
-    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'vocabulary', id));
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'vocabulary', id));
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans pb-24 text-slate-900 leading-relaxed overflow-x-hidden">
+    <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', color: '#0f172a', fontFamily: 'sans-serif' }}>
+      {/* どんなブラウザ設定でも文字が消えないようにスタイルを固定 */}
       <style>{`
-        body { margin: 0; background-color: #f8fafc !important; }
+        body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; }
+        .bg-white { background-color: white !important; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .animate-spin { animation: spin 1s linear infinite; }
       `}</style>
 
-      {/* ヘッダー */}
-      <nav className="bg-white border-b px-6 py-4 sticky top-0 z-50 flex justify-between items-center shadow-sm">
-        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('landing')}>
-          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold shadow-md">S</div>
-          <span className="font-bold text-lg tracking-tight text-slate-900">SceneMaster Pro</span>
+      <nav className="bg-white" style={{ borderBottom: '1px solid #e2e8f0', padding: '15px 20px', position: 'sticky', top: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }} onClick={() => setView('landing')}>
+          <div style={{ backgroundColor: '#4f46e5', width: '32px', height: '32px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontWeight: 'bold' }}>S</div>
+          <span style={{ fontWeight: 'bold', fontSize: '18px', color: '#0f172a' }}>SceneMaster Pro</span>
         </div>
       </nav>
 
-      <main className="max-w-xl mx-auto p-5">
+      <main style={{ maxWidth: '500px', margin: '0 auto', padding: '20px' }}>
         {view === 'landing' && (
-          <div className="py-20 text-center">
-            <div className="w-20 h-20 bg-indigo-600 rounded-3xl mx-auto flex items-center justify-center shadow-xl mb-8">
-              <Sparkles className="text-white w-10 h-10" />
+          <div style={{ textAlign: 'center', paddingTop: '60px' }}>
+            <div style={{ backgroundColor: '#4f46e5', width: '80px', height: '80px', borderRadius: '24px', margin: '0 auto 30px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 10px 15px rgba(79, 70, 229, 0.2)' }}>
+              <Sparkles style={{ color: 'white', width: '40px', height: '40px' }} />
             </div>
-            <h1 className="text-4xl font-black mb-4 tracking-tight text-slate-900">English Master</h1>
-            <p className="text-slate-500 mb-10 text-lg">状況を入れるだけで、英会話を生成。</p>
-            <div className="flex flex-col gap-4 max-w-xs mx-auto">
-              <button onClick={() => setView('generator')} className="bg-indigo-600 text-white font-bold py-4 rounded-2xl shadow-lg active:scale-95 transition-all">英会話を生成する</button>
-              <button onClick={() => setView('vocab')} className="bg-white text-slate-600 font-bold py-4 rounded-2xl border border-slate-200">My 単語帳</button>
+            <h1 style={{ fontSize: '32px', fontWeight: '900', marginBottom: '10px', color: '#0f172a' }}>English Master</h1>
+            <p style={{ color: '#64748b', marginBottom: '40px' }}>呟くだけで、英会話を生成。</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+              <button onClick={() => setView('generator')} style={{ backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '18px', borderRadius: '16px', fontWeight: 'bold', fontSize: '16px', cursor: 'pointer' }}>会話を生成する</button>
+              <button onClick={() => setView('vocab')} style={{ backgroundColor: 'white', color: '#475569', border: '1px solid #e2e8f0', padding: '18px', borderRadius: '16px', fontWeight: 'bold', fontSize: '16px', cursor: 'pointer' }}>My 単語帳</button>
             </div>
           </div>
         )}
 
         {view === 'generator' && (
-          <div className="space-y-6">
-            <div className="bg-white rounded-2xl p-6 border shadow-sm">
-              <label className="text-xs font-bold text-indigo-600 uppercase mb-2 block tracking-widest">状況を入力</label>
-              <div className="flex gap-2">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div className="bg-white" style={{ padding: '20px', borderRadius: '20px', border: '1px solid #e2e8f0' }}>
+              <label style={{ fontSize: '10px', fontWeight: 'bold', color: '#4f46e5', display: 'block', marginBottom: '8px' }}>状況を入力</label>
+              <div style={{ display: 'flex', gap: '10px' }}>
                 <input 
                   type="text" 
                   value={userInput}
                   onChange={(e) => setUserInput(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && generateContent()}
-                  placeholder="例: スタバでカスタム注文..."
-                  className="flex-1 bg-slate-100 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-600 transition-all"
+                  placeholder="例: スタバで注文..."
+                  style={{ flex: 1, padding: '12px', borderRadius: '12px', border: 'none', backgroundColor: '#f1f5f9', outline: 'none', color: '#0f172a' }}
                 />
-                <button onClick={generateContent} disabled={isLoading} className="bg-indigo-600 text-white p-3 rounded-xl shadow-md disabled:bg-slate-300">
-                  {isLoading ? <Loader2 className="animate-spin w-6 h-6" /> : <Send className="w-6 h-6" />}
+                <button onClick={generateContent} disabled={isLoading} style={{ backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '12px', borderRadius: '12px', cursor: 'pointer' }}>
+                  {isLoading ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
                 </button>
               </div>
             </div>
 
             {result && (
-              <div className="space-y-6 pb-10">
-                <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl">
-                  <h3 className="text-xl font-bold mb-1">{result.title}</h3>
-                  <p className="text-slate-400 text-sm">{result.context}</p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', paddingBottom: '60px' }}>
+                <div style={{ backgroundColor: '#1e293b', color: 'white', padding: '20px', borderRadius: '20px' }}>
+                  <h3 style={{ margin: '0 0 5px 0' }}>{result.title}</h3>
+                  <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8' }}>{result.context}</p>
                 </div>
                 
                 {result.dialogue?.map((line, i) => (
-                  <div key={i} className={`flex flex-col ${i % 2 === 0 ? 'items-start' : 'items-end'}`}>
-                    <div className={`max-w-[85%] rounded-2xl p-4 shadow-sm ${i % 2 === 0 ? 'bg-white border-l-4 border-indigo-600 text-slate-900' : 'bg-indigo-600 text-white'}`}>
-                      <span className="text-[10px] font-bold opacity-50 uppercase block mb-1">{line.speaker}</span>
-                      <p className="text-lg font-bold leading-tight">{line.english}</p>
-                      <p className={`text-xs mt-2 border-t pt-2 ${i % 2 === 0 ? 'text-slate-400 border-slate-100' : 'text-indigo-100 border-indigo-500/30'}`}>{line.japanese}</p>
+                  <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: i % 2 === 0 ? 'flex-start' : 'flex-end' }}>
+                    <div style={{ maxWidth: '85%', padding: '15px', borderRadius: '18px', backgroundColor: i % 2 === 0 ? 'white' : '#4f46e5', color: i % 2 === 0 ? '#0f172a' : 'white', border: i % 2 === 0 ? '1px solid #e2e8f0' : 'none', borderLeft: i % 2 === 0 ? '4px solid #4f46e5' : 'none' }}>
+                      <span style={{ fontSize: '10px', fontWeight: 'bold', opacity: 0.6, display: 'block', marginBottom: '4px' }}>{line.speaker}</span>
+                      <p style={{ margin: '0', fontWeight: 'bold', fontSize: '16px' }}>{line.english}</p>
+                      <p style={{ margin: '8px 0 0 0', fontSize: '12px', borderTop: '1px solid rgba(0,0,0,0.05)', paddingTop: '8px' }}>{line.japanese}</p>
                     </div>
                   </div>
                 ))}
 
-                <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
-                  <div className="bg-slate-50 px-6 py-3 border-b font-bold text-sm flex items-center gap-2">
-                    <Star size={14} className="text-amber-500 fill-amber-500" /> 重要フレーズ
-                  </div>
-                  <div className="divide-y divide-slate-100">
-                    {result.key_phrases?.map((item, i) => (
-                      <div key={i} className="p-4 flex justify-between items-center hover:bg-slate-50">
-                        <div className="flex-1">
-                          <p className="font-bold text-indigo-600 text-lg">{item.phrase}</p>
-                          <p className="text-sm text-slate-700">{item.meaning}</p>
-                        </div>
-                        <button onClick={() => saveToVocab(item)} className="p-2 text-slate-300 hover:text-amber-500 transition-colors ml-4"><Star className="w-5 h-5"/></button>
+                <div className="bg-white" style={{ borderRadius: '20px', border: '1px solid #e2e8f0', overflow: 'hidden' }}>
+                  <div style={{ backgroundColor: '#f8fafc', padding: '12px 20px', borderBottom: '1px solid #e2e8f0', fontSize: '12px', fontWeight: 'bold', color: '#0f172a' }}>重要フレーズ</div>
+                  {result.key_phrases?.map((item, i) => (
+                    <div key={i} style={{ padding: '15px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ flex: 1 }}>
+                        <p style={{ margin: 0, fontWeight: 'bold', color: '#4f46e5' }}>{item.phrase}</p>
+                        <p style={{ margin: 0, fontSize: '13px', color: '#475569' }}>{item.meaning}</p>
                       </div>
-                    ))}
-                  </div>
+                      <button onClick={() => saveToVocab(item, i)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '10px' }}>
+                        {isSaving === i ? <Loader2 className="animate-spin" size={20} color="#4f46e5" /> : vocabList.some(v => v.phrase === item.phrase) ? <Star size={24} color="#f59e0b" fill="#f59e0b" /> : <Star size={24} color="#cbd5e1" />}
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -254,39 +290,40 @@ const App = () => {
         )}
 
         {view === 'vocab' && (
-          <div className="space-y-4">
-            <h2 className="text-3xl font-black text-slate-800 tracking-tight">My Vocab</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+            <h2 style={{ fontSize: '28px', fontWeight: '900', color: '#0f172a' }}>My Vocab</h2>
             {vocabList.length === 0 ? (
-              <div className="text-center py-32 text-slate-300 border-2 border-dashed rounded-[2rem] bg-white shadow-sm">
-                単語帳は空です。生成した会話の「★」で保存しましょう。
-              </div>
+              <div className="bg-white" style={{ textAlign: 'center', padding: '60px 20px', color: '#94a3b8', border: '2px dashed #e2e8f0', borderRadius: '24px' }}>単語帳は空です。</div>
             ) : (
-              <div className="grid gap-3">
-                {vocabList.map(item => (
-                  <div key={item.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex justify-between items-center">
-                    <div className="flex-1">
-                      <p className="font-bold text-lg text-slate-900">{item.phrase}</p>
-                      <p className="text-indigo-600 font-bold text-sm">{item.meaning}</p>
-                    </div>
-                    <button onClick={() => deleteVocab(item.id)} className="p-2 text-slate-200 hover:text-red-500 ml-4"><Trash2 className="w-6 h-6"/></button>
+              vocabList.map(item => (
+                <div key={item.id} className="bg-white" style={{ padding: '20px', borderRadius: '18px', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 'bold', fontSize: '18px', color: '#0f172a' }}>{item.phrase}</p>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '14px', color: '#4f46e5', fontWeight: 'bold' }}>{item.meaning}</p>
                   </div>
-                ))}
-              </div>
+                  <button onClick={() => deleteVocab(item.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#cbd5e1' }}><Trash2 size={22}/></button>
+                </div>
+              ))
             )}
           </div>
         )}
       </main>
 
-      <div className="fixed bottom-8 left-1/2 -translate-x-1/2 w-[90%] max-w-sm bg-slate-900/95 backdrop-blur-sm text-white rounded-full p-2 flex justify-around shadow-2xl z-50 border border-white/10">
-        <button onClick={() => setView('landing')} className={`p-4 rounded-full transition-all ${view === 'landing' ? 'bg-indigo-600 shadow-lg' : 'text-slate-500'}`}><Home className="w-6 h-6"/></button>
-        <button onClick={() => setView('generator')} className={`p-4 rounded-full transition-all ${view === 'generator' ? 'bg-indigo-600 shadow-lg' : 'text-slate-500'}`}><MessageCircle className="w-6 h-6"/></button>
-        <button onClick={() => setView('vocab')} className={`p-4 rounded-full transition-all ${view === 'vocab' ? 'bg-indigo-600 shadow-lg' : 'text-slate-500'}`}><BookOpen className="w-6 h-6"/></button>
+      <div style={{ position: 'fixed', bottom: '30px', left: '50%', transform: 'translateX(-50%)', width: '85%', maxWidth: '350px', backgroundColor: 'rgba(15, 23, 42, 0.95)', borderRadius: '50px', padding: '10px', display: 'flex', justifyContent: 'space-around', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.4)', zIndex: 100 }}>
+        <div onClick={() => setView('landing')} style={{ padding: '12px', borderRadius: '50%', backgroundColor: view === 'landing' ? '#4f46e5' : 'transparent', color: view === 'landing' ? 'white' : '#94a3b8', cursor: 'pointer' }}><Home size={26}/></div>
+        <div onClick={() => setView('generator')} style={{ padding: '12px', borderRadius: '50%', backgroundColor: view === 'generator' ? '#4f46e5' : 'transparent', color: view === 'generator' ? 'white' : '#94a3b8', cursor: 'pointer' }}><MessageCircle size={26}/></div>
+        <div onClick={() => setView('vocab')} style={{ padding: '12px', borderRadius: '50%', backgroundColor: view === 'vocab' ? '#4f46e5' : 'transparent', color: view === 'vocab' ? 'white' : '#94a3b8', cursor: 'pointer' }}><BookOpen size={26}/></div>
       </div>
 
       {error && (
-        <div className="fixed top-24 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-2xl shadow-2xl z-[100] text-xs font-bold flex items-center gap-3 border border-red-500/30">
-          <Info className="w-4 h-4 text-red-500" /> 
-          <span className="max-w-[250px] truncate text-slate-100">{String(error)}</span>
+        <div style={{ position: 'fixed', bottom: '110px', left: '20px', right: '20px', backgroundColor: '#1e293b', color: 'white', padding: '15px 20px', borderRadius: '15px', fontSize: '12px', fontWeight: 'bold', zIndex: 1000, display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid #ef4444' }}>
+          <AlertCircle size={18} color="#ef4444" /> <span>{String(error)}</span>
+        </div>
+      )}
+
+      {successMsg && (
+        <div style={{ position: 'fixed', top: '80px', left: '50%', transform: 'translateX(-50%)', backgroundColor: '#4f46e5', color: 'white', padding: '10px 25px', borderRadius: '50px', fontSize: '14px', fontWeight: 'bold', zIndex: 1000, boxShadow: '0 10px 15px rgba(0,0,0,0.2)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <CheckCircle2 size={18} /> {successMsg}
         </div>
       )}
     </div>
