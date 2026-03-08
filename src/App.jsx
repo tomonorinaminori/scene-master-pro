@@ -12,7 +12,8 @@ import {
   doc, 
   addDoc, 
   onSnapshot, 
-  deleteDoc
+  deleteDoc,
+  query
 } from 'firebase/firestore';
 import { 
   MessageCircle, 
@@ -30,7 +31,8 @@ import {
 } from 'lucide-react';
 
 // --- 環境設定 ---
-// 実行環境から提供されるグローバル変数を使用するように修正
+// 実行環境から提供されるグローバル変数を使用するように修正し、
+// "import.meta" によるエラーを回避します。
 const firebaseConfig = typeof __firebase_config !== 'undefined' 
   ? JSON.parse(__firebase_config) 
   : {
@@ -42,7 +44,8 @@ const firebaseConfig = typeof __firebase_config !== 'undefined'
       appId: ""
     };
 
-const apiKey = ""; // 実行環境から提供されるため空文字列に設定
+// Gemini APIキー（実行環境より提供されるため空文字列に設定）
+const apiKey = ""; 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'scene-master-pro-v1';
 
 // Firebase の初期化
@@ -65,10 +68,10 @@ const App = () => {
   const [isPlayingAudio, setIsPlayingAudio] = useState(null);
   const [error, setError] = useState(null);
 
+  // 1. 認証処理 (RULE 3 準拠)
   useEffect(() => {
     const initAuth = async () => {
       try {
-        // カスタムトークンがある場合はそれを使用し、なければ匿名ログイン
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
         } else {
@@ -84,12 +87,15 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
+  // 2. 単語帳のリアルタイム同期 (RULE 1 & 2 準拠)
   useEffect(() => {
-    // ユーザー認証完了後のみFirestoreのリスナーを設定
     if (!user || !db) return;
     
+    // 公開データではなく、ユーザーごとのプライベートパスを使用
     const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
-    const unsubscribe = onSnapshot(vocabCol, (snapshot) => {
+    const q = query(vocabCol);
+    
+    const unsubscribe = onSnapshot(q, (snapshot) => {
       setVocabList(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     }, (err) => {
       console.error("Firestore sync error:", err);
@@ -98,13 +104,13 @@ const App = () => {
     return () => unsubscribe();
   }, [user]);
 
-  // AIによる英会話生成
+  // AIによる英会話生成（指数バックオフ付き）
   const generateContent = async () => {
     if (!userInput.trim()) return;
     setIsLoading(true);
     setError(null);
 
-    const retryFetch = async (retries = 5, delay = 1000) => {
+    const callApi = async (retries = 5, delay = 1000) => {
       try {
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
@@ -160,23 +166,23 @@ const App = () => {
       } catch (err) {
         if (retries > 0) {
           await new Promise(res => setTimeout(res, delay));
-          return retryFetch(retries - 1, delay * 2);
+          return callApi(retries - 1, delay * 2);
         }
-        setError("AIの生成中にエラーが発生しました。");
+        setError("AI生成中にエラーが発生しました。");
       } finally {
         setIsLoading(false);
       }
     };
 
-    await retryFetch();
+    await callApi();
   };
 
-  // 音声読み上げ
+  // TTS (PCM to WAV 変換付き)
   const playTTS = async (text, id) => {
     if (!text || isPlayingAudio) return;
     setIsPlayingAudio(id);
 
-    const retryTTS = async (retries = 5, delay = 1000) => {
+    const callTts = async (retries = 5, delay = 1000) => {
       try {
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
@@ -199,7 +205,6 @@ const App = () => {
         const base64Data = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
         if (!base64Data) throw new Error('No audio data');
 
-        // PCM16 to WAV conversion
         const pcmToWav = (base64, sampleRate = 24000) => {
           const binaryString = atob(base64);
           const len = binaryString.length;
@@ -210,19 +215,11 @@ const App = () => {
           const writeString = (offset, string) => {
             for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
           };
-          writeString(0, 'RIFF');
-          view.setUint32(4, 36 + len, true);
-          writeString(8, 'WAVE');
-          writeString(12, 'fmt ');
-          view.setUint32(16, 16, true);
-          view.setUint16(20, 1, true);
-          view.setUint16(22, 1, true);
-          view.setUint32(24, sampleRate, true);
-          view.setUint32(28, sampleRate * 2, true);
-          view.setUint16(32, 2, true);
-          view.setUint16(34, 16, true);
-          writeString(36, 'data');
-          view.setUint32(40, len, true);
+          writeString(0, 'RIFF'); view.setUint32(4, 36 + len, true); writeString(8, 'WAVE');
+          writeString(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+          view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+          view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true);
+          view.setUint16(34, 16, true); writeString(36, 'data'); view.setUint32(40, len, true);
           for (let i = 0; i < len; i++) view.setUint8(44 + i, bytes[i]);
           return new Blob([buffer], { type: 'audio/wav' });
         };
@@ -238,23 +235,20 @@ const App = () => {
       } catch (err) {
         if (retries > 0) {
           await new Promise(res => setTimeout(res, delay));
-          return retryTTS(retries - 1, delay * 2);
+          return callTts(retries - 1, delay * 2);
         }
         setIsPlayingAudio(null);
       }
     };
 
-    await retryTTS();
+    await callTts();
   };
 
   const saveToVocab = async (item) => {
     if (!user || !db) return;
     try {
       const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
-      await addDoc(vocabCol, { 
-        ...item, 
-        createdAt: new Date().toISOString() 
-      });
+      await addDoc(vocabCol, { ...item, createdAt: new Date().toISOString() });
     } catch (err) {
       setError("保存に失敗しました。");
     }
@@ -270,11 +264,11 @@ const App = () => {
   };
 
   return (
-    <div className="min-h-screen bg-white font-sans pb-24 text-slate-900 leading-relaxed">
+    <div className="min-h-screen bg-slate-50 font-sans pb-24 text-slate-900 leading-relaxed overflow-x-hidden">
       <nav className="bg-white border-b px-6 py-4 sticky top-0 z-50 flex justify-between items-center shadow-sm">
         <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('landing')}>
-          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold italic">S</div>
-          <span className="font-bold text-lg">SceneMaster Pro</span>
+          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold italic shadow-md">S</div>
+          <span className="font-bold text-lg tracking-tight">SceneMaster Pro</span>
         </div>
       </nav>
 
@@ -284,21 +278,11 @@ const App = () => {
             <div className="w-20 h-20 bg-indigo-600 rounded-3xl mx-auto flex items-center justify-center shadow-xl mb-8">
               <Sparkles className="text-white w-10 h-10" />
             </div>
-            <h1 className="text-4xl font-black mb-4 tracking-tight">Learn English</h1>
+            <h1 className="text-4xl font-black mb-4 tracking-tight">English Master</h1>
             <p className="text-slate-500 mb-10 text-lg">呟くだけで、あなただけの英会話レッスンを生成。</p>
             <div className="flex flex-col gap-4 max-w-xs mx-auto">
-              <button 
-                onClick={() => setView('generator')} 
-                className="bg-indigo-600 text-white font-bold py-4 rounded-2xl shadow-lg hover:bg-indigo-700 transition-all active:scale-95"
-              >
-                学習をはじめる
-              </button>
-              <button 
-                onClick={() => setView('vocab')} 
-                className="bg-white text-slate-600 font-bold py-4 rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all"
-              >
-                My 単語帳
-              </button>
+              <button onClick={() => setView('generator')} className="bg-indigo-600 text-white font-bold py-4 rounded-2xl shadow-lg hover:bg-indigo-700 active:scale-95 transition-all">学習をはじめる</button>
+              <button onClick={() => setView('vocab')} className="bg-white text-slate-600 font-bold py-4 rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all">My 単語帳</button>
             </div>
           </div>
         )}
@@ -313,14 +297,10 @@ const App = () => {
                   value={userInput}
                   onChange={(e) => setUserInput(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && generateContent()}
-                  placeholder="例: カフェで注文を間違えられた..."
+                  placeholder="例: スタバで注文を間違えられた..."
                   className="flex-1 bg-slate-50 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
                 />
-                <button 
-                  onClick={generateContent} 
-                  disabled={isLoading}
-                  className="bg-indigo-600 text-white p-3 rounded-xl shadow-md disabled:bg-slate-300"
-                >
+                <button onClick={generateContent} disabled={isLoading} className="bg-indigo-600 text-white p-3 rounded-xl shadow-md disabled:bg-slate-300">
                   {isLoading ? <Loader2 className="animate-spin w-5 h-5" /> : <Send className="w-5 h-5" />}
                 </button>
               </div>
@@ -332,13 +312,12 @@ const App = () => {
                   <h3 className="text-xl font-bold mb-1">{result.title}</h3>
                   <p className="text-slate-400 text-sm">{result.context}</p>
                 </div>
-                
                 {result.dialogue.map((line, i) => (
                   <div key={i} className={`flex flex-col ${i % 2 === 0 ? 'items-start' : 'items-end'}`}>
                     <div className={`max-w-[85%] rounded-2xl p-4 shadow-sm ${i % 2 === 0 ? 'bg-white border-l-4 border-indigo-600 text-slate-900' : 'bg-indigo-600 text-white'}`}>
                       <div className="flex justify-between items-center mb-1 gap-6">
                         <span className="text-[10px] font-bold opacity-50 uppercase tracking-tighter">{line.speaker}</span>
-                        <button onClick={() => playTTS(line.english, `d-${i}`)} className="p-1 rounded-full hover:bg-black/5">
+                        <button onClick={() => playTTS(line.english, `d-${i}`)} className="p-1 rounded-full hover:bg-black/5 transition-colors">
                           {isPlayingAudio === `d-${i}` ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Volume2 className="w-4 h-4" />}
                         </button>
                       </div>
@@ -350,23 +329,20 @@ const App = () => {
                 
                 <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
                   <div className="bg-slate-50 px-6 py-3 border-b font-bold text-sm flex items-center gap-2">
-                    <Star className="w-4 h-4 text-amber-500 fill-amber-500" /> 重要フレーズ
+                    <Star className="w-4 h-4 text-amber-500 fill-amber-500" /> 重要フレーズを保存
                   </div>
                   <div className="divide-y divide-slate-100">
                     {result.key_phrases.map((item, i) => (
                       <div key={i} className="p-4 flex justify-between items-center hover:bg-slate-50 transition-colors">
-                        <div className="flex-1">
+                        <div className="flex-1 mr-4">
                           <p className="font-bold text-indigo-600 text-lg leading-tight">{item.phrase}</p>
                           <p className="text-sm text-slate-700 font-medium">{item.meaning}</p>
-                          <p className="text-[10px] text-slate-400 mt-1 italic">{item.usage}</p>
                         </div>
-                        <div className="flex gap-1 ml-4">
+                        <div className="flex gap-1">
                           <button onClick={() => playTTS(item.phrase, `p-${i}`)} className="p-2 text-slate-300 hover:text-indigo-600 transition-colors">
                             {isPlayingAudio === `p-${i}` ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Volume2 className="w-5 h-5"/>}
                           </button>
-                          <button onClick={() => saveToVocab(item)} className="p-2 text-slate-300 hover:text-amber-500 transition-colors">
-                            <Star className="w-5 h-5"/>
-                          </button>
+                          <button onClick={() => saveToVocab(item)} className="p-2 text-slate-300 hover:text-amber-500 transition-colors"><Star className="w-5 h-5"/></button>
                         </div>
                       </div>
                     ))}
@@ -379,20 +355,20 @@ const App = () => {
 
         {view === 'vocab' && (
           <div className="space-y-4 animate-in fade-in duration-500">
-            <h2 className="text-3xl font-black text-slate-800 tracking-tight">My Vocab</h2>
+            <h2 className="text-3xl font-black text-slate-800">My Vocab</h2>
             {vocabList.length === 0 ? (
-              <div className="text-center py-32 text-slate-300 border-2 border-dashed rounded-[2rem] bg-slate-50/50">
+              <div className="text-center py-32 text-slate-300 border-2 border-dashed rounded-[2rem] bg-white shadow-sm">
                 単語帳は空です。<br/>生成した会話の「★」ボタンで保存しましょう。
               </div>
             ) : (
               <div className="grid gap-3">
                 {vocabList.map(item => (
                   <div key={item.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex justify-between items-center hover:shadow-md transition-shadow">
-                    <div className="flex-1">
+                    <div className="flex-1 mr-4">
                       <p className="font-bold text-lg text-slate-900">{item.phrase}</p>
                       <p className="text-indigo-600 font-bold text-sm">{item.meaning}</p>
                     </div>
-                    <div className="flex gap-2 ml-4">
+                    <div className="flex gap-2">
                       <button onClick={() => playTTS(item.phrase, item.id)} className="p-2 text-slate-200 hover:text-indigo-600 transition-colors">
                         {isPlayingAudio === item.id ? <RefreshCw className="w-6 h-6 animate-spin" /> : <Volume2 className="w-6 h-6"/>}
                       </button>
@@ -414,8 +390,7 @@ const App = () => {
 
       {error && (
         <div className="fixed top-24 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-2xl shadow-2xl z-[100] text-xs font-bold flex items-center gap-3 animate-in slide-in-from-top-4">
-          <Info className="w-4 h-4 text-red-500" />
-          {error}
+          <Info className="w-4 h-4 text-red-500" /> {error}
         </div>
       )}
     </div>
