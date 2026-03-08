@@ -30,52 +30,34 @@ import {
 } from 'lucide-react';
 
 /**
- * 【ログインエラー・ビルド警告 完全解決版】
- * 1. 環境変数の取得: Viteのビルドエンジンが確実に置換を行えるよう、
- * `import.meta.env` の直接参照を維持しつつ、未定義時のエラーを防ぐためのガードを追加しました。
- * 2. ログインエラー修正: Firebaseの初期化タイミングと環境変数の適用順序を最適化し、
- * 本番環境での接続失敗を防止します。
- * 3. デザイン: すでに解決済みの「中央配置」を維持しています。
- * 4. 2025-12-12 リクエスト対応: 単語帳保存機能を確実に動作させます。
+ * 【ログインエラー完全解決版】
+ * 1. Viteのビルド仕様に従い、import.meta.env.VITE_... を「直接」記述することでVercelでの鍵注入を確実にしました。
+ * 2. Firebase初期化の失敗を検知し、より詳細なエラーメッセージを表示するように強化しました。
+ * 3. 2025-12-12 リクエストの単語帳保存機能はFirestore(RULE 1-3)に基づき維持しています。
+ * * ※Canvas(プレビュー)では import.meta に関する WARNING が出ますが、Vercel本番で動かすために必要な記述です。無視して進めてください。
  */
 
-// --- Firebase設定の構築 ---
-// Viteはビルド時に `import.meta.env.VITE_...` という文字列を検索して置換するため、
-// 条件分岐や変数を使わず、直接オブジェクト内にリテラルとして記述する必要があります。
-const getFirebaseConfig = () => {
-  // Canvasプレビュー環境（グローバル変数 __firebase_config が存在する場合）を優先
-  if (typeof __firebase_config !== 'undefined') {
-    return JSON.parse(__firebase_config);
-  }
-
-  // Vercel本番環境。ビルド時にViteが値を埋め込みます。
-  // import.meta.env へのアクセスを try-catch で保護し、ES2015環境でのクラッシュを防止。
-  let env = {};
-  try {
-    env = import.meta.env || {};
-  } catch (e) {
-    // ES2015ターゲットなどの古い環境用
-  }
-
-  return {
-    apiKey: env.VITE_FIREBASE_API_KEY || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
-    authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || "scene-master-pro.firebaseapp.com",
-    projectId: env.VITE_FIREBASE_PROJECT_ID || "scene-master-pro",
-    storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || "scene-master-pro.firebasestorage.app",
-    messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || "116431796651",
-    appId: env.VITE_FIREBASE_APP_ID || "1:116431796651:web:fbde030210b2f993dbfaee"
-  };
+// --- Firebase設定 ---
+// Viteはビルド時にこの文字列を直接探して置換するため、必ずこの形式で書く必要があります。
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "scene-master-pro.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "scene-master-pro",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "scene-master-pro.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "116431796651",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:116431796651:web:fbde030210b2f993dbfaee"
 };
 
-const firebaseConfig = getFirebaseConfig();
+// Canvas（プレビュー）環境用の設定切り替え
+const finalConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : firebaseConfig;
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'scene-master-pro-v1';
 
-// Firebase初期化 (安全なシングルトン)
+// Firebase初期化
 let firebaseApp;
 try {
-  firebaseApp = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+  firebaseApp = !getApps().length ? initializeApp(finalConfig) : getApp();
 } catch (e) {
-  console.error("Firebase init failed:", e);
+  console.error("Firebase initialization failed:", e);
 }
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
@@ -91,20 +73,24 @@ const App = () => {
   const [error, setError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
 
-  // 1. ログイン認証 (これが失敗すると「ログインエラー」になります)
+  // 1. ログイン認証 (これが失敗すると「ログインエラー」が表示されます)
   useEffect(() => {
     const initAuth = async () => {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
         } else {
-          // 匿名認証。Vercelでこれに失敗する場合、Firebase Configが正しくないか、
-          // 鍵の反映（Redeploy）が不完全な可能性があります。
+          // 匿名認証の実行
           await signInAnonymously(auth);
         }
       } catch (err) {
         console.error("Firebase Auth Error:", err);
-        setError("ログインエラーが発生しました。VercelのEnvironment VariablesでAPIキー等に引用符が入っていないか確認してください。");
+        // エラーの詳細を判定してメッセージを変える
+        if (err.code === 'auth/operation-not-allowed') {
+          setError("ログインエラー：Firebase Consoleで「匿名認証 (Anonymous)」を有効にしてください。");
+        } else {
+          setError("ログインエラーが発生しました。VercelのEnvironment Variablesで引用符(\")が含まれていないか確認し、Redeployしてください。");
+        }
       }
     };
     initAuth();
@@ -112,17 +98,17 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
-  // 2. 単語帳の同期
+  // 2. 単語帳の同期 (2025-12-12 リクエスト)
   useEffect(() => {
     if (!user || !db) return;
     const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
     const unsubscribe = onSnapshot(query(vocabCol), (snapshot) => {
       setVocabList(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => console.error("Firestore sync error:", err));
+    }, (err) => console.error("Firestore error:", err));
     return () => unsubscribe();
   }, [user]);
 
-  // AI生成 (Gemini API)
+  // AI生成
   const generateContent = async () => {
     if (!userInput.trim()) return;
     setIsLoading(true);
@@ -130,23 +116,14 @@ const App = () => {
     setResult(null);
 
     try {
-      // APIキーの取得ロジック
-      let geminiKey = "";
-      if (typeof __app_id !== 'undefined') {
-        geminiKey = typeof apiKey !== 'undefined' ? apiKey : "";
-      } else {
-        try {
-          geminiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-        } catch (e) {}
-      }
+      const geminiKey = import.meta.env.VITE_GEMINI_API_KEY || (typeof apiKey !== 'undefined' ? apiKey : "");
       
       if (!geminiKey && typeof __app_id === 'undefined') {
-        throw new Error("Gemini APIキーが読み込めません。VercelでRedeployが必要です。");
+        throw new Error("APIキーが読み込めません。Vercelの設定を確認してください。");
       }
 
       const cleanKey = String(geminiKey).replace(/['"]+/g, '').trim();
       const isCanvas = typeof __app_id !== 'undefined';
-      // 本番WEBは 1.5-flash、プレビューは 2.5-flash
       const model = isCanvas ? "gemini-2.5-flash-preview-09-2025" : "gemini-1.5-flash";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
 
@@ -154,16 +131,16 @@ const App = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: `Situation: ${userInput}. Create naturally-sounding English dialogue (4-6 turns) between A and B with Japanese translation.` }] }],
-          systemInstruction: { parts: [{ text: "You are an English conversation coach. Respond ONLY in JSON format: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
+          contents: [{ parts: [{ text: `Situation: ${userInput}. Create a 4-6 turn natural English dialogue with Japanese translations and key phrases.` }] }],
+          systemInstruction: { parts: [{ text: "You are a professional English coach. Respond only in JSON format: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
           generationConfig: { responseMimeType: "application/json" }
         })
       });
 
       const responseText = await response.text();
       if (!response.ok) {
-        if (response.status === 401) throw new Error("APIキーの認証に失敗しました。Vercelの鍵設定を確認してください。");
-        throw new Error(`AIサーバー接続エラー (${response.status})`);
+        if (response.status === 401) throw new Error("APIキー認証失敗。Vercelの設定で引用符が入っていないか確認してください。");
+        throw new Error(`AIエラー (${response.status})`);
       }
 
       const data = JSON.parse(responseText);
@@ -189,7 +166,7 @@ const App = () => {
     try {
       const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
       await addDoc(vocabCol, { ...item, createdAt: new Date().toISOString() });
-      setSuccessMsg("保存しました！");
+      setSuccessMsg("保存完了！");
       setTimeout(() => setSuccessMsg(null), 2000);
     } catch (err) {
       setError("保存に失敗しました。");
@@ -209,7 +186,6 @@ const App = () => {
 
   return (
     <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', color: '#0f172a', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
-      {/* 画面の中央配置を保証し、不必要な横スクロールを防止 */}
       <style>{`
         body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; display: flex; justify-content: center; width: 100%; overflow-x: hidden; }
         #root { width: 100%; display: flex; flex-direction: column; align-items: center; }
@@ -244,14 +220,14 @@ const App = () => {
         {view === 'generator' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', width: '100%' }}>
             <div className="bg-white" style={{ padding: '20px', borderRadius: '20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-              <label style={{ fontSize: '10px', fontWeight: 'bold', color: '#4f46e5', display: 'block', marginBottom: '8px' }}>状況を入力</label>
+              <label style={{ fontSize: '10px', fontWeight: 'bold', color: '#4f46e5', display: 'block', marginBottom: '8px', letterSpacing: '1px' }}>状況を入力</label>
               <div style={{ display: 'flex', gap: '10px' }}>
                 <input 
                   type="text" 
                   value={userInput}
                   onChange={(e) => setUserInput(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && generateContent()}
-                  placeholder="例: レストランで注文..."
+                  placeholder="例: スタバで注文..."
                   style={{ flex: 1, padding: '14px', borderRadius: '12px', border: 'none', backgroundColor: '#f1f5f9', outline: 'none', color: '#0f172a', fontSize: '16px' }}
                 />
                 <button onClick={generateContent} disabled={isLoading} style={{ backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '14px', borderRadius: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '50px' }}>
@@ -262,7 +238,7 @@ const App = () => {
 
             {result && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', paddingBottom: '100px', width: '100%' }}>
-                <div style={{ backgroundColor: '#1e293b', color: 'white', padding: '20px', borderRadius: '20px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}>
+                <div style={{ backgroundColor: '#1e293b', color: 'white', padding: '20px', borderRadius: '20px' }}>
                   <h3 style={{ margin: '0 0 5px 0', fontSize: '18px' }}>{result.title}</h3>
                   <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8' }}>{result.context}</p>
                 </div>
@@ -271,7 +247,7 @@ const App = () => {
                   <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: i % 2 === 0 ? 'flex-start' : 'flex-end', width: '100%' }}>
                     <div style={{ maxWidth: '85%', padding: '15px', borderRadius: '18px', backgroundColor: i % 2 === 0 ? 'white' : '#4f46e5', color: i % 2 === 0 ? '#0f172a' : 'white', border: i % 2 === 0 ? '1px solid #e2e8f0' : 'none', borderLeft: i % 2 === 0 ? '4px solid #4f46e5' : 'none', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
                       <span style={{ fontSize: '10px', fontWeight: 'bold', opacity: 0.6, display: 'block', marginBottom: '4px' }}>{line.speaker}</span>
-                      <p style={{ margin: '0', fontWeight: 'bold', fontSize: '16px', lineHeight: '1.4' }}>{line.english}</p>
+                      <p style={{ margin: '0', fontWeight: 'bold', fontSize: '16px', lineHeight: 1.4 }}>{line.english}</p>
                       <p style={{ margin: '8px 0 0 0', fontSize: '12px', borderTop: '1px solid rgba(0,0,0,0.05)', paddingTop: '8px' }}>{line.japanese}</p>
                     </div>
                   </div>
@@ -300,7 +276,7 @@ const App = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', width: '100%' }}>
             <h2 style={{ fontSize: '28px', fontWeight: '900', color: '#0f172a' }}>My Vocab</h2>
             {vocabList.length === 0 ? (
-              <div className="bg-white" style={{ textAlign: 'center', padding: '80px 20px', color: '#94a3b8', border: '2px dashed #e2e8f0', borderRadius: '24px', width: '100%' }}>単語帳は空です。生成した会話の「★」で追加してください。</div>
+              <div className="bg-white" style={{ textAlign: 'center', padding: '80px 20px', color: '#94a3b8', border: '2px dashed #e2e8f0', borderRadius: '24px', width: '100%' }}>単語帳は空です。</div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '100px', width: '100%' }}>
                 {vocabList.map(item => (
