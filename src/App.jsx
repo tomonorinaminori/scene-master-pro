@@ -3,6 +3,7 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import { 
   getAuth, 
   signInAnonymously, 
+  signInWithCustomToken,
   onAuthStateChanged 
 } from 'firebase/auth';
 import { 
@@ -21,40 +22,52 @@ import {
   BookOpen, 
   Loader2, 
   Info, 
-  RefreshCw,
-  Home,
-  Star,
-  Trash2,
+  RefreshCw, 
+  Home, 
+  Star, 
+  Trash2, 
   Sparkles, 
-  ArrowRight
+  ArrowRight 
 } from 'lucide-react';
 
 /**
- * ログインエラーの修正とデザイン復旧を兼ねた最終版です。
+ * 送信ボタンの動作と環境変数の読み込みエラーを修正した最終版です。
+ * プレビュー環境とVercel公開環境の両方で、警告なしに動作するように調整しました。
  */
 
-// --- Firebase & API 設定 ---
-const firebaseConfig = {
-  apiKey: "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
-  authDomain: "scene-master-pro.firebaseapp.com",
-  projectId: "scene-master-pro",
-  storageBucket: "scene-master-pro.firebasestorage.app",
-  messagingSenderId: "116431796651",
-  appId: "1:116431796651:web:fbde030210b2f993dbfaee"
+// --- 安全な環境変数取得関数 ---
+const getEnvVar = (key) => {
+  try {
+    // Vite環境 (Vercelなど)
+    if (typeof import.meta !== 'undefined' && import.meta.env) {
+      return import.meta.env[key] || "";
+    }
+  } catch (e) {
+    // 取得失敗時は空文字を返す
+  }
+  return "";
 };
 
-const geminiApiKey = "AIzaSyDPSMOMuarm6-aSEwRsLTyJmo0jKVnThxw"; 
-const appId = 'scene-master-pro-v1';
+// --- Firebase & API 設定 ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' 
+  ? JSON.parse(__firebase_config) 
+  : {
+      apiKey: getEnvVar("VITE_FIREBASE_API_KEY") || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
+      authDomain: getEnvVar("VITE_FIREBASE_AUTH_DOMAIN") || "scene-master-pro.firebaseapp.com",
+      projectId: getEnvVar("VITE_FIREBASE_PROJECT_ID") || "scene-master-pro",
+      storageBucket: getEnvVar("VITE_FIREBASE_STORAGE_BUCKET") || "scene-master-pro.firebasestorage.app",
+      messagingSenderId: getEnvVar("VITE_FIREBASE_MESSAGING_SENDER_ID") || "116431796651",
+      appId: getEnvVar("VITE_FIREBASE_APP_ID") || "1:116431796651:web:fbde030210b2f993dbfaee"
+    };
+
+// グローバルのapiKeyがあれば優先（Canvasプレビュー環境用）
+const systemApiKey = typeof apiKey !== 'undefined' ? apiKey : "";
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'scene-master-pro-v1';
 
 // Firebase初期化
-let app, auth, db;
-try {
-  app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-  auth = getAuth(app);
-  db = getFirestore(app);
-} catch (e) {
-  console.error("Firebase初期化失敗:", e);
-}
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+const auth = getAuth(app);
+const db = getFirestore(app);
 
 const App = () => {
   const [user, setUser] = useState(null);
@@ -66,23 +79,23 @@ const App = () => {
   const [isPlayingAudio, setIsPlayingAudio] = useState(null);
   const [error, setError] = useState(null);
 
-  // 1. ログイン処理
+  // 1. 認証処理
   useEffect(() => {
-    if (!auth) return;
-    
-    // 匿名ログインの実行
-    signInAnonymously(auth)
-      .then(() => {
-        console.log("ログイン成功");
-        setError(null);
-      })
-      .catch((err) => {
-        console.error("ログインエラー詳細:", err);
-        // Firebase Consoleで「匿名ログイン」が有効になっていない場合に発生します
-        setError("ログインエラー: Firebase Consoleで'匿名ログイン'を有効にしてください。");
-      });
-
-    return onAuthStateChanged(auth, setUser);
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+        setError("ログインエラーが発生しました。");
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
   }, []);
 
   // 2. 単語帳の同期
@@ -90,13 +103,12 @@ const App = () => {
     if (!user || !db) return;
     const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
     const q = query(vocabCol);
-    
-    return onSnapshot(q, (snapshot) => {
+    const unsubscribe = onSnapshot(q, (snapshot) => {
       setVocabList(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     }, (err) => {
-      console.error("データ同期エラー:", err);
-      setError("データの読み込みに失敗しました。ルール設定を確認してください。");
+      console.error("Firestore error:", err);
     });
+    return () => unsubscribe();
   }, [user]);
 
   // AI生成処理
@@ -104,70 +116,141 @@ const App = () => {
     if (!userInput.trim()) return;
     setIsLoading(true);
     setError(null);
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${geminiApiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: `シチュエーション: ${userInput}` }] }],
-            systemInstruction: { parts: [{ text: "プロの英会話コーチとしてJSON形式で回答してください。{title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
-            generationConfig: { responseMimeType: "application/json" }
-          })
+
+    // 有効なAPIキーを特定
+    const activeKey = systemApiKey || getEnvVar("VITE_GEMINI_API_KEY");
+
+    const callApi = async (retries = 0) => {
+      if (!activeKey && typeof __firebase_config === 'undefined') {
+        setError("APIキーが設定されていません。Vercelの環境変数を確認してください。");
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${activeKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: `シチュエーション: ${userInput}` }] }],
+              systemInstruction: { parts: [{ text: "プロの英会話コーチとして、自然な会話と重要語彙をJSON形式で提供してください。形式: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
+              generationConfig: { 
+                responseMimeType: "application/json",
+                responseSchema: {
+                  type: "OBJECT",
+                  properties: {
+                    title: { type: "STRING" },
+                    context: { type: "STRING" },
+                    dialogue: {
+                      type: "ARRAY",
+                      items: {
+                        type: "OBJECT",
+                        properties: {
+                          speaker: { type: "STRING" },
+                          english: { type: "STRING" },
+                          japanese: { type: "STRING" }
+                        }
+                      }
+                    },
+                    key_phrases: {
+                      type: "ARRAY",
+                      items: {
+                        type: "OBJECT",
+                        properties: {
+                          phrase: { type: "STRING" },
+                          meaning: { type: "STRING" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            })
+          }
+        );
+        
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error?.message || 'API request failed');
         }
-      );
-      
-      if (!response.ok) throw new Error('API request failed');
-      const data = await response.json();
-      setResult(JSON.parse(data.candidates[0].content.parts[0].text));
-      setUserInput("");
-    } catch (err) {
-      console.error(err);
-      setError("AI生成に失敗しました。APIキーを確認してください。");
-    } finally {
-      setIsLoading(false);
-    }
+
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) throw new Error('No content returned');
+        
+        setResult(JSON.parse(text));
+        setUserInput("");
+      } catch (err) {
+        if (retries < 5) {
+          const delay = Math.pow(2, retries) * 1000;
+          await new Promise(res => setTimeout(res, delay));
+          return callApi(retries + 1);
+        }
+        setError(`エラー: ${err.message}`);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    await callApi();
   };
 
   // 音声再生
   const playTTS = async (text, id) => {
     if (!text || isPlayingAudio) return;
     setIsPlayingAudio(id);
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${geminiApiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: text }] }],
-            generationConfig: { 
-              responseModalities: ["AUDIO"],
-              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } }
-            },
-            model: "gemini-2.5-flash-preview-tts"
-          })
+
+    const activeKey = systemApiKey || getEnvVar("VITE_GEMINI_API_KEY");
+
+    const callTts = async (retries = 0) => {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${activeKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: text }] }],
+              generationConfig: { 
+                responseModalities: ["AUDIO"],
+                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } }
+              },
+              model: "gemini-2.5-flash-preview-tts"
+            })
+          }
+        );
+
+        const data = await response.json();
+        const base64Data = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (!base64Data) throw new Error('No audio');
+
+        const audio = new Audio(`data:audio/wav;base64,${base64Data}`);
+        audio.onended = () => setIsPlayingAudio(null);
+        await audio.play();
+      } catch (err) {
+        if (retries < 5) {
+          await new Promise(res => setTimeout(res, 1000));
+          return callTts(retries + 1);
         }
-      );
-      const data = await response.json();
-      const audio = new Audio(`data:audio/wav;base64,${data.candidates[0].content.parts[0].inlineData.data}`);
-      audio.onended = () => setIsPlayingAudio(null);
-      await audio.play();
-    } catch (err) { 
-      setIsPlayingAudio(null); 
-    }
+        setIsPlayingAudio(null);
+      }
+    };
+
+    await callTts();
   };
 
   const saveToVocab = async (item) => {
     if (!user || !db) return;
     try {
-      await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary'), { 
+      const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
+      await addDoc(vocabCol, { 
         ...item, 
         createdAt: new Date().toISOString() 
       });
     } catch (err) {
-      setError("保存に失敗しました。Firestoreのルールを確認してください。");
+      setError("保存に失敗しました。");
     }
   };
 
@@ -178,7 +261,6 @@ const App = () => {
 
   return (
     <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', color: '#0f172a', fontFamily: 'sans-serif' }}>
-      {/* 画面が真っ暗になるのを防ぐ強制スタイル */}
       <style>{`
         body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; }
         .bg-white { background-color: white; }
@@ -276,7 +358,7 @@ const App = () => {
               </div>
             ) : (
               vocabList.map(item => (
-                <div key={item.id} style={{ backgroundColor: 'white', padding: '20px', borderRadius: '18px', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                <div key={item.id} style={{ backgroundColor: 'white', padding: '20px', borderRadius: '18px', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 2px rgba(0,0,0,0.1)' }}>
                   <div style={{ flex: 1 }}>
                     <p style={{ margin: 0, fontWeight: 'bold', fontSize: '18px' }}>{item.phrase}</p>
                     <p style={{ margin: '2px 0 0 0', fontSize: '14px', color: '#4f46e5', fontWeight: 'bold' }}>{item.meaning}</p>
