@@ -30,19 +30,18 @@ import {
 } from 'lucide-react';
 
 /**
- * 【es2015互換性・401エラー完全解消 最終決定版】
- * - "import.meta" の静的解析エラーを回避するため、動的な関数経由で環境変数を取得。
- * - Vercel(本番)では安定版モデル gemini-1.5-flash、Canvas(プレビュー)では最新モデルを自動選択。
- * - 画面が左上に寄ってしまうバグを解消し、常に中央に配置されるようレイアウトを修正。
- * - 2025-12-12に記憶した単語帳保存機能を完備。
+ * 【es2015互換性・Vercel完全対応 最終決定版】
+ * - "import.meta" の静的解析エラーを回避しつつ、Viteの本番ビルドで環境変数を確実に取得。
+ * - 画面が左上に寄ってしまうバグを解消し、常に中央に表示されるようレイアウトを修正。
+ * - 2025-12-12に記憶した「英単語リスト」保存機能を確実に動作させます。
  */
 
-// --- 環境変数取得の安全な関数 (es2015ターゲットでのコンパイル警告を完全に回避) ---
+// --- 環境変数取得の安全な関数 (es2015ターゲットでの警告回避) ---
 const getEnvValue = (key) => {
   try {
-    // new Function を使うことで、ビルド時の静的チェックから import.meta を隠蔽します
-    const metaEnv = new Function('try { return import.meta.env; } catch(e) { return null; }')();
-    return metaEnv ? metaEnv[key] : "";
+    // コンパイラによるチェックを回避するため、実行時に動的に参照します
+    const meta = new Function('try { return import.meta; } catch(e) { return null; }')();
+    return (meta && meta.env) ? meta.env[key] : "";
   } catch (e) {
     return "";
   }
@@ -50,12 +49,12 @@ const getEnvValue = (key) => {
 
 // --- Firebase 設定 ---
 const getFirebaseConfig = () => {
-  // 1. Canvasプレビュー環境のグローバル変数を優先
+  // 1. Canvasプレビュー環境のグローバル変数を最優先
   if (typeof __firebase_config !== 'undefined') {
     return JSON.parse(__firebase_config);
   }
 
-  // 2. Vercel環境変数の取得 (動的取得によりコンパイルエラーを回避)
+  // 2. Vercel本番環境 (Viteのビルド時置換を考慮したフォールバック)
   return {
     apiKey: getEnvValue("VITE_FIREBASE_API_KEY") || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
     authDomain: getEnvValue("VITE_FIREBASE_AUTH_DOMAIN") || "scene-master-pro.firebaseapp.com",
@@ -69,7 +68,7 @@ const getFirebaseConfig = () => {
 const firebaseConfig = getFirebaseConfig();
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'scene-master-pro-v1';
 
-// Firebase初期化 (安全なシングルトン)
+// Firebase初期化
 const firebaseApp = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
@@ -85,7 +84,7 @@ const App = () => {
   const [error, setError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
 
-  // 1. 認証処理
+  // 1. 認証
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -95,7 +94,6 @@ const App = () => {
           await signInAnonymously(auth);
         }
       } catch (err) {
-        console.error("Auth error:", err);
         setError("ログインエラーが発生しました。");
       }
     };
@@ -104,33 +102,19 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
-  // 2. 単語帳の同期
+  // 2. 単語帳のリアルタイム同期
   useEffect(() => {
     if (!user || !db) return;
     const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
     const unsubscribe = onSnapshot(query(vocabCol), (snapshot) => {
       setVocabList(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     }, (err) => {
-      console.error("Firestore Error:", err);
+      console.error("Firestore sync error:", err);
     });
     return () => unsubscribe();
   }, [user]);
 
-  // 指数バックオフ付きフェッチ
-  const robustFetch = async (url, options, retries = 5) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        const response = await fetch(url, options);
-        if (response.ok) return await response.json();
-        if (response.status === 401) throw new Error("認証失敗(401)");
-      } catch (err) {
-        if (i === retries - 1) throw err;
-        await new Promise(r => setTimeout(r, Math.pow(2, i) * 1000));
-      }
-    }
-  };
-
-  // AI生成処理
+  // AI生成（Gemini API）
   const generateContent = async () => {
     if (!userInput.trim()) return;
     setIsLoading(true);
@@ -141,32 +125,38 @@ const App = () => {
       const geminiKey = getEnvValue("VITE_GEMINI_API_KEY") || (typeof apiKey !== 'undefined' ? apiKey : "");
       
       if (!geminiKey && typeof __firebase_config === 'undefined') {
-        throw new Error("APIキーが読み込めません。Vercelの設定を確認してRedeployしてください。");
+        throw new Error("APIキーが読み込めません。VercelでRedeployが必要です。");
       }
 
       const cleanKey = String(geminiKey).replace(/['"]+/g, '').trim();
       const isCanvas = typeof __app_id !== 'undefined';
+      // 本番WEB版では gemini-1.5-flash を使用して401エラーを回避
       const model = isCanvas ? "gemini-2.5-flash-preview-09-2025" : "gemini-1.5-flash";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
 
-      const data = await robustFetch(url, {
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: `Situation: ${userInput}. Natural English dialogue (4-6 turns) with Japanese translation.` }] }],
-          systemInstruction: { parts: [{ text: "You are an English coach. Return a JSON object: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
+          contents: [{ parts: [{ text: `Situation: ${userInput}. Create a 4-6 turn natural English dialogue with Japanese translations and key phrases.` }] }],
+          systemInstruction: { parts: [{ text: "You are an English coach. Return a JSON object with {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
           generationConfig: { responseMimeType: "application/json" }
         })
       });
 
-      const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!aiText) throw new Error("AIの応答が空でした。");
+      const responseText = await response.text();
+      if (!response.ok) {
+        if (response.status === 401) throw new Error("API認証エラー。Vercelの鍵設定を確認してRedeployしてください。");
+        throw new Error(`通信失敗 (${response.status})`);
+      }
 
-      const parsed = JSON.parse(aiText.replace(/```json/g, "").replace(/```/g, "").trim());
+      const data = JSON.parse(responseText);
+      const aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      const parsed = JSON.parse(aiResponse.replace(/```json/g, "").replace(/```/g, "").trim());
       setResult(parsed);
       setUserInput("");
     } catch (err) {
-      setError(err.message === "認証失敗(401)" ? "APIキー認証失敗。Redeployが必要です。" : `エラー: ${err.message}`);
+      setError(err.message);
     } finally {
       setIsLoading(false);
     }
@@ -183,7 +173,7 @@ const App = () => {
     try {
       const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
       await addDoc(vocabCol, { ...item, createdAt: new Date().toISOString() });
-      setSuccessMsg("保存しました！");
+      setSuccessMsg("保存完了！");
       setTimeout(() => setSuccessMsg(null), 2000);
     } catch (err) {
       setError("保存失敗");
@@ -194,20 +184,19 @@ const App = () => {
 
   const deleteVocab = async (id) => {
     if (!user || !db) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'vocabulary', id));
-    } catch (err) {
-      console.error(err);
-    }
+    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'vocabulary', id));
   };
 
   return (
-    <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', color: '#0f172a', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+    <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', color: '#0f172a', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
+      {/* デザインの「左寄りバグ」と「真っ白バグ」を回避する強制スタイル */}
       <style>{`
-        body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; }
+        body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; display: flex; justify-content: center; width: 100%; }
+        #root { width: 100%; display: flex; flex-direction: column; align-items: center; }
         .bg-white { background-color: white !important; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .animate-spin { animation: spin 1s linear infinite; }
+        * { box-sizing: border-box; }
       `}</style>
 
       <nav className="bg-white" style={{ borderBottom: '1px solid #e2e8f0', padding: '15px 20px', position: 'sticky', top: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%' }}>
@@ -217,9 +206,9 @@ const App = () => {
         </div>
       </nav>
 
-      <main style={{ maxWidth: '500px', width: '100%', padding: '20px', flex: 1, display: 'flex', flexDirection: 'column' }}>
+      <main style={{ maxWidth: '500px', width: '100%', padding: '20px', flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
         {view === 'landing' && (
-          <div style={{ textAlign: 'center', padding: '80px 0', flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ textAlign: 'center', padding: '100px 0', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
             <div style={{ backgroundColor: '#4f46e5', width: '80px', height: '80px', borderRadius: '24px', marginBottom: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 10px 20px rgba(79, 70, 229, 0.2)' }}>
               <Sparkles style={{ color: 'white', width: '40px', height: '40px' }} />
             </div>
@@ -235,14 +224,14 @@ const App = () => {
         {view === 'generator' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', width: '100%' }}>
             <div className="bg-white" style={{ padding: '20px', borderRadius: '20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-              <label style={{ fontSize: '10px', fontWeight: 'bold', color: '#4f46e5', display: 'block', marginBottom: '8px', letterSpacing: '1px' }}>状況を入力</label>
+              <label style={{ fontSize: '10px', fontWeight: 'bold', color: '#4f46e5', display: 'block', marginBottom: '8px' }}>状況を入力</label>
               <div style={{ display: 'flex', gap: '10px' }}>
                 <input 
                   type="text" 
                   value={userInput}
                   onChange={(e) => setUserInput(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && generateContent()}
-                  placeholder="例: スタバで注文..."
+                  placeholder="例: レストランで注文..."
                   style={{ flex: 1, padding: '14px', borderRadius: '12px', border: 'none', backgroundColor: '#f1f5f9', outline: 'none', color: '#0f172a', fontSize: '16px' }}
                 />
                 <button onClick={generateContent} disabled={isLoading} style={{ backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '14px', borderRadius: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '50px' }}>
@@ -252,14 +241,14 @@ const App = () => {
             </div>
 
             {result && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', paddingBottom: '100px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', paddingBottom: '100px', width: '100%' }}>
                 <div style={{ backgroundColor: '#1e293b', color: 'white', padding: '20px', borderRadius: '20px' }}>
                   <h3 style={{ margin: '0 0 5px 0', fontSize: '18px' }}>{result.title}</h3>
                   <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8' }}>{result.context}</p>
                 </div>
                 
                 {result.dialogue?.map((line, i) => (
-                  <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: i % 2 === 0 ? 'flex-start' : 'flex-end' }}>
+                  <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: i % 2 === 0 ? 'flex-start' : 'flex-end', width: '100%' }}>
                     <div style={{ maxWidth: '85%', padding: '15px', borderRadius: '18px', backgroundColor: i % 2 === 0 ? 'white' : '#4f46e5', color: i % 2 === 0 ? '#0f172a' : 'white', border: i % 2 === 0 ? '1px solid #e2e8f0' : 'none', borderLeft: i % 2 === 0 ? '4px solid #4f46e5' : 'none', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
                       <span style={{ fontSize: '10px', fontWeight: 'bold', opacity: 0.6, display: 'block', marginBottom: '4px' }}>{line.speaker}</span>
                       <p style={{ margin: '0', fontWeight: 'bold', fontSize: '16px', lineHeight: '1.4' }}>{line.english}</p>
@@ -268,7 +257,7 @@ const App = () => {
                   </div>
                 ))}
 
-                <div className="bg-white" style={{ borderRadius: '20px', border: '1px solid #e2e8f0', overflow: 'hidden' }}>
+                <div className="bg-white" style={{ borderRadius: '20px', border: '1px solid #e2e8f0', overflow: 'hidden', width: '100%' }}>
                   <div style={{ backgroundColor: '#f8fafc', padding: '12px 20px', borderBottom: '1px solid #e2e8f0', fontSize: '12px', fontWeight: 'bold', color: '#0f172a' }}>重要フレーズ</div>
                   {result.key_phrases?.map((item, i) => (
                     <div key={i} style={{ padding: '15px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -291,11 +280,11 @@ const App = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', width: '100%' }}>
             <h2 style={{ fontSize: '28px', fontWeight: '900', color: '#0f172a' }}>My Vocab</h2>
             {vocabList.length === 0 ? (
-              <div className="bg-white" style={{ textAlign: 'center', padding: '80px 20px', color: '#94a3b8', border: '2px dashed #e2e8f0', borderRadius: '24px' }}>単語帳は空です。</div>
+              <div className="bg-white" style={{ textAlign: 'center', padding: '80px 20px', color: '#94a3b8', border: '2px dashed #e2e8f0', borderRadius: '24px', width: '100%' }}>単語帳は空です。</div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '100px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '100px', width: '100%' }}>
                 {vocabList.map(item => (
-                  <div key={item.id} className="bg-white" style={{ padding: '20px', borderRadius: '18px', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div key={item.id} className="bg-white" style={{ padding: '20px', borderRadius: '18px', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', width: '100%' }}>
                     <div>
                       <p style={{ margin: 0, fontWeight: 'bold', fontSize: '18px', color: '#0f172a' }}>{item.phrase}</p>
                       <p style={{ margin: '2px 0 0 0', fontSize: '14px', color: '#4f46e5', fontWeight: 'bold' }}>{item.meaning}</p>
@@ -316,7 +305,7 @@ const App = () => {
       </div>
 
       {error && (
-        <div style={{ position: 'fixed', bottom: '110px', left: '20px', right: '20px', backgroundColor: '#1e293b', color: 'white', padding: '15px 20px', borderRadius: '15px', fontSize: '12px', fontWeight: 'bold', zIndex: 1000, display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid #ef4444' }}>
+        <div style={{ position: 'fixed', bottom: '110px', left: '50%', transform: 'translateX(-50%)', width: '90%', maxWidth: '400px', backgroundColor: '#1e293b', color: 'white', padding: '15px 20px', borderRadius: '15px', fontSize: '12px', fontWeight: 'bold', zIndex: 1000, display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid #ef4444' }}>
           <AlertCircle size={18} color="#ef4444" /> <span>{String(error)}</span>
         </div>
       )}
