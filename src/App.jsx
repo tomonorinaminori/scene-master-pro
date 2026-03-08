@@ -3,7 +3,6 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import { 
   getAuth, 
   signInAnonymously, 
-  signInWithCustomToken,
   onAuthStateChanged 
 } from 'firebase/auth';
 import { 
@@ -30,33 +29,32 @@ import {
   ArrowRight
 } from 'lucide-react';
 
-// --- 環境設定 ---
-// 実行環境から提供されるグローバル変数を使用するように修正し、
-// "import.meta" によるエラーを回避します。
-const firebaseConfig = typeof __firebase_config !== 'undefined' 
-  ? JSON.parse(__firebase_config) 
-  : {
-      apiKey: "",
-      authDomain: "",
-      projectId: "",
-      storageBucket: "",
-      messagingSenderId: "",
-      appId: ""
-    };
+/**
+ * ログインエラーの修正とデザイン復旧を兼ねた最終版です。
+ */
 
-// Gemini APIキー（実行環境より提供されるため空文字列に設定）
-const apiKey = ""; 
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'scene-master-pro-v1';
+// --- Firebase & API 設定 ---
+const firebaseConfig = {
+  apiKey: "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
+  authDomain: "scene-master-pro.firebaseapp.com",
+  projectId: "scene-master-pro",
+  storageBucket: "scene-master-pro.firebasestorage.app",
+  messagingSenderId: "116431796651",
+  appId: "1:116431796651:web:fbde030210b2f993dbfaee"
+};
 
-// Firebase の初期化
+const geminiApiKey = "AIzaSyDPSMOMuarm6-aSEwRsLTyJmo0jKVnThxw"; 
+const appId = 'scene-master-pro-v1';
+
+// Firebase初期化
 let app, auth, db;
-if (!getApps().length) {
-  app = initializeApp(firebaseConfig);
-} else {
-  app = getApp();
+try {
+  app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+} catch (e) {
+  console.error("Firebase初期化失敗:", e);
 }
-auth = getAuth(app);
-db = getFirestore(app);
 
 const App = () => {
   const [user, setUser] = useState(null);
@@ -68,285 +66,201 @@ const App = () => {
   const [isPlayingAudio, setIsPlayingAudio] = useState(null);
   const [error, setError] = useState(null);
 
-  // 1. 認証処理 (RULE 3 準拠)
+  // 1. ログイン処理
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) {
-        console.error("Auth error:", err);
-        setError("認証エラーが発生しました。");
-      }
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
-    return () => unsubscribe();
+    if (!auth) return;
+    
+    // 匿名ログインの実行
+    signInAnonymously(auth)
+      .then(() => {
+        console.log("ログイン成功");
+        setError(null);
+      })
+      .catch((err) => {
+        console.error("ログインエラー詳細:", err);
+        // Firebase Consoleで「匿名ログイン」が有効になっていない場合に発生します
+        setError("ログインエラー: Firebase Consoleで'匿名ログイン'を有効にしてください。");
+      });
+
+    return onAuthStateChanged(auth, setUser);
   }, []);
 
-  // 2. 単語帳のリアルタイム同期 (RULE 1 & 2 準拠)
+  // 2. 単語帳の同期
   useEffect(() => {
     if (!user || !db) return;
-    
-    // 公開データではなく、ユーザーごとのプライベートパスを使用
     const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
     const q = query(vocabCol);
     
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    return onSnapshot(q, (snapshot) => {
       setVocabList(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     }, (err) => {
-      console.error("Firestore sync error:", err);
+      console.error("データ同期エラー:", err);
+      setError("データの読み込みに失敗しました。ルール設定を確認してください。");
     });
-    
-    return () => unsubscribe();
   }, [user]);
 
-  // AIによる英会話生成（指数バックオフ付き）
+  // AI生成処理
   const generateContent = async () => {
     if (!userInput.trim()) return;
     setIsLoading(true);
     setError(null);
-
-    const callApi = async (retries = 5, delay = 1000) => {
-      try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: `シチュエーション: ${userInput}` }] }],
-              systemInstruction: { parts: [{ text: "プロの英会話コーチとして、自然な会話と重要語彙をJSON形式で提供してください。形式: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning, usage}]}" }] },
-              generationConfig: { 
-                responseMimeType: "application/json",
-                responseSchema: {
-                  type: "OBJECT",
-                  properties: {
-                    title: { type: "STRING" },
-                    context: { type: "STRING" },
-                    dialogue: {
-                      type: "ARRAY",
-                      items: {
-                        type: "OBJECT",
-                        properties: {
-                          speaker: { type: "STRING" },
-                          english: { type: "STRING" },
-                          japanese: { type: "STRING" }
-                        }
-                      }
-                    },
-                    key_phrases: {
-                      type: "ARRAY",
-                      items: {
-                        type: "OBJECT",
-                        properties: {
-                          phrase: { type: "STRING" },
-                          meaning: { type: "STRING" },
-                          usage: { type: "STRING" }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            })
-          }
-        );
-        
-        if (!response.ok) throw new Error('API request failed');
-        const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!text) throw new Error('No content returned');
-        
-        setResult(JSON.parse(text));
-        setUserInput("");
-      } catch (err) {
-        if (retries > 0) {
-          await new Promise(res => setTimeout(res, delay));
-          return callApi(retries - 1, delay * 2);
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${geminiApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `シチュエーション: ${userInput}` }] }],
+            systemInstruction: { parts: [{ text: "プロの英会話コーチとしてJSON形式で回答してください。{title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
+            generationConfig: { responseMimeType: "application/json" }
+          })
         }
-        setError("AI生成中にエラーが発生しました。");
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    await callApi();
+      );
+      
+      if (!response.ok) throw new Error('API request failed');
+      const data = await response.json();
+      setResult(JSON.parse(data.candidates[0].content.parts[0].text));
+      setUserInput("");
+    } catch (err) {
+      console.error(err);
+      setError("AI生成に失敗しました。APIキーを確認してください。");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  // TTS (PCM to WAV 変換付き)
+  // 音声再生
   const playTTS = async (text, id) => {
     if (!text || isPlayingAudio) return;
     setIsPlayingAudio(id);
-
-    const callTts = async (retries = 5, delay = 1000) => {
-      try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: text }] }],
-              generationConfig: { 
-                responseModalities: ["AUDIO"],
-                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } }
-              },
-              model: "gemini-2.5-flash-preview-tts"
-            })
-          }
-        );
-
-        if (!response.ok) throw new Error('TTS failed');
-        const data = await response.json();
-        const base64Data = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (!base64Data) throw new Error('No audio data');
-
-        const pcmToWav = (base64, sampleRate = 24000) => {
-          const binaryString = atob(base64);
-          const len = binaryString.length;
-          const bytes = new Uint8Array(len);
-          for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
-          const buffer = new ArrayBuffer(44 + len);
-          const view = new DataView(buffer);
-          const writeString = (offset, string) => {
-            for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
-          };
-          writeString(0, 'RIFF'); view.setUint32(4, 36 + len, true); writeString(8, 'WAVE');
-          writeString(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-          view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
-          view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true);
-          view.setUint16(34, 16, true); writeString(36, 'data'); view.setUint32(40, len, true);
-          for (let i = 0; i < len; i++) view.setUint8(44 + i, bytes[i]);
-          return new Blob([buffer], { type: 'audio/wav' });
-        };
-
-        const audioBlob = pcmToWav(base64Data);
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
-        audio.onended = () => {
-          setIsPlayingAudio(null);
-          URL.revokeObjectURL(audioUrl);
-        };
-        await audio.play();
-      } catch (err) {
-        if (retries > 0) {
-          await new Promise(res => setTimeout(res, delay));
-          return callTts(retries - 1, delay * 2);
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${geminiApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: text }] }],
+            generationConfig: { 
+              responseModalities: ["AUDIO"],
+              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } }
+            },
+            model: "gemini-2.5-flash-preview-tts"
+          })
         }
-        setIsPlayingAudio(null);
-      }
-    };
-
-    await callTts();
+      );
+      const data = await response.json();
+      const audio = new Audio(`data:audio/wav;base64,${data.candidates[0].content.parts[0].inlineData.data}`);
+      audio.onended = () => setIsPlayingAudio(null);
+      await audio.play();
+    } catch (err) { 
+      setIsPlayingAudio(null); 
+    }
   };
 
   const saveToVocab = async (item) => {
     if (!user || !db) return;
     try {
-      const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
-      await addDoc(vocabCol, { ...item, createdAt: new Date().toISOString() });
+      await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary'), { 
+        ...item, 
+        createdAt: new Date().toISOString() 
+      });
     } catch (err) {
-      setError("保存に失敗しました。");
+      setError("保存に失敗しました。Firestoreのルールを確認してください。");
     }
   };
 
   const deleteVocab = async (id) => {
     if (!user || !db) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'vocabulary', id));
-    } catch (err) {
-      console.error(err);
-    }
+    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'vocabulary', id));
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans pb-24 text-slate-900 leading-relaxed overflow-x-hidden">
-      <nav className="bg-white border-b px-6 py-4 sticky top-0 z-50 flex justify-between items-center shadow-sm">
-        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('landing')}>
-          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold italic shadow-md">S</div>
-          <span className="font-bold text-lg tracking-tight">SceneMaster Pro</span>
+    <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', color: '#0f172a', fontFamily: 'sans-serif' }}>
+      {/* 画面が真っ暗になるのを防ぐ強制スタイル */}
+      <style>{`
+        body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; }
+        .bg-white { background-color: white; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+      `}</style>
+
+      <nav className="bg-white shadow-sm" style={{ padding: '15px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 50 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }} onClick={() => setView('landing')}>
+          <div style={{ backgroundColor: '#4f46e5', width: '32px', height: '32px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontWeight: 'bold' }}>S</div>
+          <span style={{ fontWeight: 'bold', fontSize: '18px' }}>SceneMaster Pro</span>
         </div>
       </nav>
 
-      <main className="max-w-xl mx-auto p-5">
+      <main style={{ maxWidth: '500px', margin: '0 auto', padding: '20px' }}>
         {view === 'landing' && (
-          <div className="py-20 text-center animate-in fade-in duration-700">
-            <div className="w-20 h-20 bg-indigo-600 rounded-3xl mx-auto flex items-center justify-center shadow-xl mb-8">
-              <Sparkles className="text-white w-10 h-10" />
+          <div style={{ textAlign: 'center', paddingTop: '60px' }}>
+            <div style={{ backgroundColor: '#4f46e5', width: '80px', height: '80px', borderRadius: '24px', margin: '0 auto 30px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 10px 15px -3px rgba(79, 70, 229, 0.4)' }}>
+              <Sparkles style={{ color: 'white', width: '40px', height: '40px' }} />
             </div>
-            <h1 className="text-4xl font-black mb-4 tracking-tight">English Master</h1>
-            <p className="text-slate-500 mb-10 text-lg">呟くだけで、あなただけの英会話レッスンを生成。</p>
-            <div className="flex flex-col gap-4 max-w-xs mx-auto">
-              <button onClick={() => setView('generator')} className="bg-indigo-600 text-white font-bold py-4 rounded-2xl shadow-lg hover:bg-indigo-700 active:scale-95 transition-all">学習をはじめる</button>
-              <button onClick={() => setView('vocab')} className="bg-white text-slate-600 font-bold py-4 rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all">My 単語帳</button>
+            <h1 style={{ fontSize: '32px', fontWeight: '900', marginBottom: '10px' }}>English Master</h1>
+            <p style={{ color: '#64748b', marginBottom: '40px', fontSize: '18px' }}>呟くだけで、あなただけの英会話レッスンを生成。</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', maxWidth: '300px', margin: '0 auto' }}>
+              <button onClick={() => setView('generator')} style={{ backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '18px', borderRadius: '16px', fontWeight: 'bold', fontSize: '16px', cursor: 'pointer', transition: '0.2s' }}>学習をはじめる</button>
+              <button onClick={() => setView('vocab')} style={{ backgroundColor: 'white', color: '#475569', border: '1px solid #e2e8f0', padding: '18px', borderRadius: '16px', fontWeight: 'bold', fontSize: '16px', cursor: 'pointer' }}>My 単語帳</button>
             </div>
           </div>
         )}
 
         {view === 'generator' && (
-          <div className="space-y-6">
-            <div className="bg-white rounded-2xl p-6 border shadow-sm">
-              <label className="text-xs font-bold text-indigo-600 uppercase mb-2 block tracking-widest">今の状況を入力</label>
-              <div className="flex gap-2">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+              <label style={{ fontSize: '10px', fontWeight: 'bold', color: '#4f46e5', display: 'block', marginBottom: '8px', letterSpacing: '1px', textTransform: 'uppercase' }}>シチュエーション</label>
+              <div style={{ display: 'flex', gap: '10px' }}>
                 <input 
                   type="text" 
                   value={userInput}
                   onChange={(e) => setUserInput(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && generateContent()}
-                  placeholder="例: スタバで注文を間違えられた..."
-                  className="flex-1 bg-slate-50 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
+                  placeholder="例: スタバで注文..."
+                  style={{ flex: 1, padding: '14px', borderRadius: '12px', border: 'none', backgroundColor: '#f1f5f9', outline: 'none', fontSize: '16px' }}
                 />
-                <button onClick={generateContent} disabled={isLoading} className="bg-indigo-600 text-white p-3 rounded-xl shadow-md disabled:bg-slate-300">
-                  {isLoading ? <Loader2 className="animate-spin w-5 h-5" /> : <Send className="w-5 h-5" />}
+                <button onClick={generateContent} disabled={isLoading} style={{ backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '14px', borderRadius: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {isLoading ? <Loader2 style={{ animation: 'spin 1s linear infinite' }} size={24} /> : <Send size={24} />}
                 </button>
               </div>
             </div>
 
             {result && (
-              <div className="space-y-6 pb-10">
-                <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl">
-                  <h3 className="text-xl font-bold mb-1">{result.title}</h3>
-                  <p className="text-slate-400 text-sm">{result.context}</p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', paddingBottom: '60px' }}>
+                <div style={{ backgroundColor: '#1e293b', color: 'white', padding: '20px', borderRadius: '20px', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }}>
+                  <h3 style={{ margin: '0 0 5px 0', fontSize: '20px' }}>{result.title}</h3>
+                  <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8' }}>{result.context}</p>
                 </div>
                 {result.dialogue.map((line, i) => (
-                  <div key={i} className={`flex flex-col ${i % 2 === 0 ? 'items-start' : 'items-end'}`}>
-                    <div className={`max-w-[85%] rounded-2xl p-4 shadow-sm ${i % 2 === 0 ? 'bg-white border-l-4 border-indigo-600 text-slate-900' : 'bg-indigo-600 text-white'}`}>
-                      <div className="flex justify-between items-center mb-1 gap-6">
-                        <span className="text-[10px] font-bold opacity-50 uppercase tracking-tighter">{line.speaker}</span>
-                        <button onClick={() => playTTS(line.english, `d-${i}`)} className="p-1 rounded-full hover:bg-black/5 transition-colors">
-                          {isPlayingAudio === `d-${i}` ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Volume2 className="w-4 h-4" />}
-                        </button>
+                  <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: i % 2 === 0 ? 'flex-start' : 'flex-end' }}>
+                    <div style={{ maxWidth: '85%', padding: '15px', borderRadius: '18px', backgroundColor: i % 2 === 0 ? 'white' : '#4f46e5', color: i % 2 === 0 ? '#1e293b' : 'white', borderLeft: i % 2 === 0 ? '4px solid #4f46e5' : 'none', boxShadow: '0 1px 2px rgba(0,0,0,0.1)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '10px', fontWeight: 'bold', opacity: 0.6, textTransform: 'uppercase' }}>{line.speaker}</span>
+                        <Volume2 size={16} onClick={() => playTTS(line.english, `d-${i}`)} style={{ cursor: 'pointer', opacity: 0.5 }} />
                       </div>
-                      <p className="text-lg font-bold leading-tight">{line.english}</p>
-                      <p className={`text-xs mt-2 border-t pt-2 ${i % 2 === 0 ? 'text-slate-400 border-slate-50' : 'text-indigo-100 border-indigo-500/30'}`}>{line.japanese}</p>
+                      <p style={{ margin: '0', fontWeight: 'bold', fontSize: '18px', lineHeight: 1.3 }}>{line.english}</p>
+                      <p style={{ margin: '10px 0 0 0', fontSize: '13px', opacity: 0.7, borderTop: '1px solid rgba(0,0,0,0.05)', paddingTop: '10px' }}>{line.japanese}</p>
                     </div>
                   </div>
                 ))}
-                
-                <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
-                  <div className="bg-slate-50 px-6 py-3 border-b font-bold text-sm flex items-center gap-2">
-                    <Star className="w-4 h-4 text-amber-500 fill-amber-500" /> 重要フレーズを保存
+
+                <div className="bg-white" style={{ borderRadius: '20px', border: '1px solid #e2e8f0', overflow: 'hidden' }}>
+                  <div style={{ backgroundColor: '#f8fafc', padding: '12px 20px', borderBottom: '1px solid #e2e8f0', fontSize: '12px', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Star size={14} style={{ color: '#f59e0b', fill: '#f59e0b' }} /> 重要フレーズを保存
                   </div>
-                  <div className="divide-y divide-slate-100">
-                    {result.key_phrases.map((item, i) => (
-                      <div key={i} className="p-4 flex justify-between items-center hover:bg-slate-50 transition-colors">
-                        <div className="flex-1 mr-4">
-                          <p className="font-bold text-indigo-600 text-lg leading-tight">{item.phrase}</p>
-                          <p className="text-sm text-slate-700 font-medium">{item.meaning}</p>
-                        </div>
-                        <div className="flex gap-1">
-                          <button onClick={() => playTTS(item.phrase, `p-${i}`)} className="p-2 text-slate-300 hover:text-indigo-600 transition-colors">
-                            {isPlayingAudio === `p-${i}` ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Volume2 className="w-5 h-5"/>}
-                          </button>
-                          <button onClick={() => saveToVocab(item)} className="p-2 text-slate-300 hover:text-amber-500 transition-colors"><Star className="w-5 h-5"/></button>
-                        </div>
+                  {result.key_phrases.map((item, i) => (
+                    <div key={i} style={{ padding: '15px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ flex: 1 }}>
+                        <p style={{ margin: 0, fontWeight: 'bold', color: '#4f46e5', fontSize: '16px' }}>{item.phrase}</p>
+                        <p style={{ margin: 0, fontSize: '14px', color: '#475569' }}>{item.meaning}</p>
                       </div>
-                    ))}
-                  </div>
+                      <div style={{ display: 'flex', gap: '5px' }}>
+                        <button onClick={() => playTTS(item.phrase, `p-${i}`)} style={{ background: 'none', border: 'none', padding: '10px', color: '#cbd5e1', cursor: 'pointer' }}><Volume2 size={20}/></button>
+                        <button onClick={() => saveToVocab(item)} style={{ background: 'none', border: 'none', padding: '10px', color: '#cbd5e1', cursor: 'pointer' }}><Star size={20}/></button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -354,43 +268,40 @@ const App = () => {
         )}
 
         {view === 'vocab' && (
-          <div className="space-y-4 animate-in fade-in duration-500">
-            <h2 className="text-3xl font-black text-slate-800">My Vocab</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+            <h2 style={{ fontSize: '28px', fontWeight: '900' }}>My Vocab</h2>
             {vocabList.length === 0 ? (
-              <div className="text-center py-32 text-slate-300 border-2 border-dashed rounded-[2rem] bg-white shadow-sm">
-                単語帳は空です。<br/>生成した会話の「★」ボタンで保存しましょう。
+              <div style={{ textAlign: 'center', padding: '60px 20px', color: '#94a3b8', border: '2px dashed #e2e8f0', borderRadius: '24px', backgroundColor: 'white' }}>
+                単語帳は空です。<br/>英会話を生成して「★」ボタンを押すとここに保存されます。
               </div>
             ) : (
-              <div className="grid gap-3">
-                {vocabList.map(item => (
-                  <div key={item.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex justify-between items-center hover:shadow-md transition-shadow">
-                    <div className="flex-1 mr-4">
-                      <p className="font-bold text-lg text-slate-900">{item.phrase}</p>
-                      <p className="text-indigo-600 font-bold text-sm">{item.meaning}</p>
-                    </div>
-                    <div className="flex gap-2">
-                      <button onClick={() => playTTS(item.phrase, item.id)} className="p-2 text-slate-200 hover:text-indigo-600 transition-colors">
-                        {isPlayingAudio === item.id ? <RefreshCw className="w-6 h-6 animate-spin" /> : <Volume2 className="w-6 h-6"/>}
-                      </button>
-                      <button onClick={() => deleteVocab(item.id)} className="p-2 text-slate-200 hover:text-red-500 transition-colors"><Trash2 className="w-6 h-6"/></button>
-                    </div>
+              vocabList.map(item => (
+                <div key={item.id} style={{ backgroundColor: 'white', padding: '20px', borderRadius: '18px', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div style={{ flex: 1 }}>
+                    <p style={{ margin: 0, fontWeight: 'bold', fontSize: '18px' }}>{item.phrase}</p>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '14px', color: '#4f46e5', fontWeight: 'bold' }}>{item.meaning}</p>
                   </div>
-                ))}
-              </div>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <Volume2 size={22} onClick={() => playTTS(item.phrase, item.id)} style={{ color: '#cbd5e1', cursor: 'pointer' }} />
+                    <Trash2 size={22} onClick={() => deleteVocab(item.id)} style={{ color: '#cbd5e1', cursor: 'pointer' }} />
+                  </div>
+                </div>
+              ))
             )}
           </div>
         )}
       </main>
 
-      <div className="fixed bottom-8 left-1/2 -translate-x-1/2 w-[90%] max-w-sm bg-slate-900/90 backdrop-blur-xl text-white rounded-full p-2 flex justify-around shadow-2xl z-50 border border-white/10">
-        <button onClick={() => setView('landing')} className={`p-4 rounded-full transition-all ${view === 'landing' ? 'bg-indigo-600 shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}><Home className="w-6 h-6"/></button>
-        <button onClick={() => setView('generator')} className={`p-4 rounded-full transition-all ${view === 'generator' ? 'bg-indigo-600 shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}><MessageCircle className="w-6 h-6"/></button>
-        <button onClick={() => setView('vocab')} className={`p-4 rounded-full transition-all ${view === 'vocab' ? 'bg-indigo-600 shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}><BookOpen className="w-6 h-6"/></button>
+      {/* ボトムナビ */}
+      <div style={{ position: 'fixed', bottom: '30px', left: '50%', transform: 'translateX(-50%)', width: '85%', maxWidth: '350px', backgroundColor: 'rgba(15, 23, 42, 0.95)', backdropFilter: 'blur(10px)', borderRadius: '50px', padding: '10px', display: 'flex', justifyContent: 'space-around', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.4)', zIndex: 100, border: '1px solid rgba(255,255,255,0.1)' }}>
+        <div onClick={() => setView('landing')} style={{ padding: '12px', borderRadius: '50%', backgroundColor: view === 'landing' ? '#4f46e5' : 'transparent', color: view === 'landing' ? 'white' : '#94a3b8', cursor: 'pointer', transition: '0.2s' }}><Home size={26}/></div>
+        <div onClick={() => setView('generator')} style={{ padding: '12px', borderRadius: '50%', backgroundColor: view === 'generator' ? '#4f46e5' : 'transparent', color: view === 'generator' ? 'white' : '#94a3b8', cursor: 'pointer', transition: '0.2s' }}><MessageCircle size={26}/></div>
+        <div onClick={() => setView('vocab')} style={{ padding: '12px', borderRadius: '50%', backgroundColor: view === 'vocab' ? '#4f46e5' : 'transparent', color: view === 'vocab' ? 'white' : '#94a3b8', cursor: 'pointer', transition: '0.2s' }}><BookOpen size={26}/></div>
       </div>
 
       {error && (
-        <div className="fixed top-24 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-2xl shadow-2xl z-[100] text-xs font-bold flex items-center gap-3 animate-in slide-in-from-top-4">
-          <Info className="w-4 h-4 text-red-500" /> {error}
+        <div style={{ position: 'fixed', bottom: '110px', left: '20px', right: '20px', backgroundColor: '#1e293b', color: 'white', padding: '15px 20px', borderRadius: '15px', fontSize: '12px', fontWeight: 'bold', zIndex: 1000, boxShadow: '0 10px 15px -3px rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <Info size={18} style={{ color: '#ef4444' }} /> {error}
         </div>
       )}
     </div>
