@@ -29,25 +29,25 @@ import {
 } from 'lucide-react';
 
 /**
- * 【ログインエラー・ビルド警告 完全解決版】
- * 1. 警告回避: es2015ターゲットでの import.meta 警告を回避するため、
- * Viteのビルドエンジンが値を確実に埋め込める形式を維持しつつ、実行時の評価にガードを入れました。
- * 2. ログインエラーの根絶: Vercel本番環境での環境変数読み込み失敗に備え、
- * 予備の設定値を Firebase Config に直接統合し、接続の確立を保証します。
- * 3. デザイン: スマホ・PC問わず、常に画面の左右中央に表示されるようレイアウトを固定。
+ * 【エラー特定優先・Vercel本番完全対応版】
+ * 1. ビルド警告の解消: es2015環境での import.meta 警告を回避するため、
+ * Viteのビルドエンジンが確実に置換を行いつつ、実行時にエラーにならない記述に調整しました。
+ * 2. ログインエラー修正: Vercel本番環境での環境変数読み込み失敗に備え、
+ * 設定値をフォールバック付きで確実に Firebase Config に渡すようにしました。
+ * 3. モデル更新: 404エラー回避のため、最新かつ安定した "gemini-2.5-flash" を使用。
  * 4. 2025-12-12 リクエスト対応: 単語帳保存機能を Firestore (RULE 1-3) に基づき完備。
  */
 
 // --- Firebase設定 ---
-// Viteはビルド時に import.meta.env.VITE_... という文字列を直接探して置換するため、この形式で記述します。
-// 置換が空の場合でも動作を保証するため、デフォルトの値をフォールバックとして設定します。
+// Viteはビルド時に import.meta.env.VITE_... を直接置換するため、この形式を維持します。
+// 置換が空の場合でも動作するよう、デフォルト値をバックアップとして持たせています。
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "scene-master-pro.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "scene-master-pro",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "scene-master-pro.firebasestorage.app",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "116431796651",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:116431796651:web:fbde030210b2f993dbfaee"
+  apiKey: (function() { try { return import.meta.env.VITE_FIREBASE_API_KEY; } catch(e) { return ""; } })() || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
+  authDomain: (function() { try { return import.meta.env.VITE_FIREBASE_AUTH_DOMAIN; } catch(e) { return ""; } })() || "scene-master-pro.firebaseapp.com",
+  projectId: (function() { try { return import.meta.env.VITE_FIREBASE_PROJECT_ID; } catch(e) { return ""; } })() || "scene-master-pro",
+  storageBucket: (function() { try { return import.meta.env.VITE_FIREBASE_STORAGE_BUCKET; } catch(e) { return ""; } })() || "scene-master-pro.firebasestorage.app",
+  messagingSenderId: (function() { try { return import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID; } catch(e) { return ""; } })() || "116431796651",
+  appId: (function() { try { return import.meta.env.VITE_FIREBASE_APP_ID; } catch(e) { return ""; } })() || "1:116431796651:web:fbde030210b2f993dbfaee"
 };
 
 // Canvas プレビュー環境用の設定優先処理
@@ -55,15 +55,18 @@ const isCanvas = typeof __app_id !== 'undefined';
 const finalConfig = isCanvas ? JSON.parse(__firebase_config) : firebaseConfig;
 const appId = isCanvas ? __app_id : 'scene-master-pro-v1';
 
-// Firebase初期化 (安全なシングルトン)
-let firebaseApp;
+// --- Firebase初期化の安全性向上 ---
+let firebaseApp = null;
+let auth = null;
+let db = null;
+
 try {
-  firebaseApp = !getApps().length ? initializeApp(finalConfig) : getApp();
+  firebaseApp = getApps().length ? getApp() : initializeApp(finalConfig);
+  auth = getAuth(firebaseApp);
+  db = getFirestore(firebaseApp);
 } catch (e) {
   console.error("Firebase init failed:", e);
 }
-const auth = getAuth(firebaseApp);
-const db = getFirestore(firebaseApp);
 
 const App = () => {
   const [user, setUser] = useState(null);
@@ -76,27 +79,33 @@ const App = () => {
   const [error, setError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
 
-  // 1. ログイン認証 (これが失敗すると「ログインエラー」が表示されます)
+  // 1. ログイン認証 ( auth が存在する場合のみ実行)
   useEffect(() => {
+    if (!auth) {
+      setError("Firebaseの初期化に失敗しました。APIキー等の環境変数を確認してください。");
+      return;
+    }
+
     const initAuth = async () => {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
         } else {
-          // 匿名認証。APIキーが正しく注入されていれば成功します。
+          // 匿名認証。Firebase Consoleで「匿名認証」が有効である必要があります。
           await signInAnonymously(auth);
         }
       } catch (err) {
-        console.error("Auth Error:", err);
-        setError(`ログインエラー: Vercelの設定を確認し、Redeployを再度実行してください。(${err.code})`);
+        console.error("Auth Error Detail:", err);
+        setError(`ログインエラー: ${err.code || err.message}`);
       }
     };
+
     initAuth();
     const unsubscribe = onAuthStateChanged(auth, setUser);
     return () => unsubscribe();
   }, []);
 
-  // 2. 単語帳のリアルタイム同期
+  // 2. 単語帳の同期 (2025-12-12 リクエスト対応)
   useEffect(() => {
     if (!user || !db) return;
     const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
@@ -116,23 +125,22 @@ const App = () => {
     setResult(null);
 
     try {
-      // APIキー取得 (Vercel環境変数または直接入力値)
-      const geminiKey = import.meta.env.VITE_GEMINI_API_KEY || (typeof apiKey !== 'undefined' ? apiKey : "AIzaSyDPSMOMuarm6-aSEwRsLTyJmo0jKVnThxw");
+      // APIキー取得ロジック
+      const geminiKey = isCanvas ? (typeof apiKey !== 'undefined' ? apiKey : "") : (function() { try { return import.meta.env.VITE_GEMINI_API_KEY; } catch(e) { return ""; } })() || "AIzaSyDPSMOMuarm6-aSEwRsLTyJmo0jKVnThxw";
       
-      if (!geminiKey && !isCanvas) {
-        throw new Error("APIキーが設定されていません。Vercelの設定を確認してください。");
+      if (!geminiKey) {
+        throw new Error("Gemini APIキーが設定されていません。VercelのEnvironment Variablesを確認してください。");
       }
 
       const cleanKey = String(geminiKey).replace(/['"]+/g, '').trim();
-      // WEB公開版は安定版 gemini-1.5-flash、プレビューは 2.5 を使用
-      const model = isCanvas ? "gemini-2.5-flash-preview-09-2025" : "gemini-1.5-flash";
+      const model = "gemini-2.5-flash"; // 404エラーを避けるため最新モデルに固定
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
 
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: `Situation: ${userInput}. Create a 4-6 turn natural English dialogue with Japanese translations and key phrases.` }] }],
+          contents: [{ parts: [{ text: `Situation: ${userInput}. Create a 4-6 turn natural English dialogue between A and B with Japanese translations and key phrases.` }] }],
           systemInstruction: { parts: [{ text: "You are a professional English coach. Respond only in JSON format: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
           generationConfig: { responseMimeType: "application/json" }
         })
@@ -140,9 +148,7 @@ const App = () => {
 
       const responseText = await response.text();
       if (!response.ok) {
-        if (response.status === 401) throw new Error("APIキー認証失敗。反映待ちか、鍵の入力ミスです。");
-        if (response.status === 404) throw new Error("AIサーバー接続失敗(404)。Redeployを行ってください。");
-        throw new Error(`エラー (${response.status})`);
+        throw new Error(`AIサーバー通信エラー (${response.status}): APIキーの無効またはモデル名の不備の可能性があります。`);
       }
 
       const data = JSON.parse(responseText);
@@ -168,7 +174,7 @@ const App = () => {
     try {
       const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
       await addDoc(vocabCol, { ...item, createdAt: new Date().toISOString() });
-      setSuccessMsg("保存完了！");
+      setSuccessMsg("保存しました！");
       setTimeout(() => setSuccessMsg(null), 2000);
     } catch (err) {
       setError("保存に失敗しました。");
@@ -188,7 +194,6 @@ const App = () => {
 
   return (
     <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', color: '#0f172a', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
-      {/* 画面の中央配置とデザインの強制固定 */}
       <style>{`
         body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; display: flex; justify-content: center; width: 100%; overflow-x: hidden; }
         #root { width: 100%; display: flex; flex-direction: column; align-items: center; }
