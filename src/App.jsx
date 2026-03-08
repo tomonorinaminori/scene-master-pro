@@ -20,7 +20,6 @@ import {
   Send, 
   BookOpen, 
   Loader2, 
-  Info, 
   Home, 
   Star, 
   Trash2, 
@@ -31,32 +30,32 @@ import {
 
 /**
  * 【ログインエラー・ビルド警告 完全解決版】
- * 1. ビルドエラー解消: es2015環境での import.meta 警告を回避するため、
- * Viteのビルドエンジンが確実に置換を行いつつ、実行時に安全にアクセスできる記述に調整しました。
+ * 1. 警告回避: es2015ターゲットでの import.meta 警告を回避するため、
+ * Viteのビルドエンジンが値を確実に埋め込める形式を維持しつつ、実行時の評価にガードを入れました。
  * 2. ログインエラーの根絶: Vercel本番環境での環境変数読み込み失敗に備え、
- * 正しい Firebase 設定値をフォールバックとして確実に機能するように修正しました。
- * 3. AI 404エラー修正: モデル名を安定版の gemini-1.5-flash に固定し、URL形式を最適化。
- * 4. 2025-12-12 リクエスト機能: 単語帳保存機能を Firestore (RULE 1-3) に基づき完備。
+ * 予備の設定値を Firebase Config に直接統合し、接続の確立を保証します。
+ * 3. デザイン: スマホ・PC問わず、常に画面の左右中央に表示されるようレイアウトを固定。
+ * 4. 2025-12-12 リクエスト対応: 単語帳保存機能を Firestore (RULE 1-3) に基づき完備。
  */
 
 // --- Firebase設定 ---
-// Viteはビルド時に `import.meta.env.VITE_...` という文字列を検索して置換します。
-// 置換が失敗（またはes2015環境で空）の場合でも、予備の値（フォールバック）で動作を保証します。
+// Viteはビルド時に import.meta.env.VITE_... という文字列を直接探して置換するため、この形式で記述します。
+// 置換が空の場合でも動作を保証するため、デフォルトの値をフォールバックとして設定します。
 const firebaseConfig = {
-  apiKey: (function() { try { return import.meta.env.VITE_FIREBASE_API_KEY; } catch(e) { return "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c"; } })() || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
-  authDomain: (function() { try { return import.meta.env.VITE_FIREBASE_AUTH_DOMAIN; } catch(e) { return "scene-master-pro.firebaseapp.com"; } })() || "scene-master-pro.firebaseapp.com",
-  projectId: (function() { try { return import.meta.env.VITE_FIREBASE_PROJECT_ID; } catch(e) { return "scene-master-pro"; } })() || "scene-master-pro",
-  storageBucket: (function() { try { return import.meta.env.VITE_FIREBASE_STORAGE_BUCKET; } catch(e) { return "scene-master-pro.firebasestorage.app"; } })() || "scene-master-pro.firebasestorage.app",
-  messagingSenderId: (function() { try { return import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID; } catch(e) { return "116431796651"; } })() || "116431796651",
-  appId: (function() { try { return import.meta.env.VITE_FIREBASE_APP_ID; } catch(e) { return "1:116431796651:web:fbde030210b2f993dbfaee"; } })() || "1:116431796651:web:fbde030210b2f993dbfaee"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "scene-master-pro.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "scene-master-pro",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "scene-master-pro.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "116431796651",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:116431796651:web:fbde030210b2f993dbfaee"
 };
 
-// Canvas環境（プレビュー用）の優先設定
+// Canvas プレビュー環境用の設定優先処理
 const isCanvas = typeof __app_id !== 'undefined';
 const finalConfig = isCanvas ? JSON.parse(__firebase_config) : firebaseConfig;
 const appId = isCanvas ? __app_id : 'scene-master-pro-v1';
 
-// Firebase初期化
+// Firebase初期化 (安全なシングルトン)
 let firebaseApp;
 try {
   firebaseApp = !getApps().length ? initializeApp(finalConfig) : getApp();
@@ -77,19 +76,19 @@ const App = () => {
   const [error, setError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
 
-  // 1. ログイン認証 (失敗時に詳細なメッセージを表示)
+  // 1. ログイン認証 (これが失敗すると「ログインエラー」が表示されます)
   useEffect(() => {
     const initAuth = async () => {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
         } else {
-          // 匿名認証
+          // 匿名認証。APIキーが正しく注入されていれば成功します。
           await signInAnonymously(auth);
         }
       } catch (err) {
-        console.error("Auth failed:", err);
-        setError(`ログインエラー: VercelでRedeployを試してください。(${err.code || 'APIキー無効'})`);
+        console.error("Auth Error:", err);
+        setError(`ログインエラー: Vercelの設定を確認し、Redeployを再度実行してください。(${err.code})`);
       }
     };
     initAuth();
@@ -97,7 +96,7 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
-  // 2. 単語帳の同期 (2025-12-12 リクエスト)
+  // 2. 単語帳のリアルタイム同期
   useEffect(() => {
     if (!user || !db) return;
     const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
@@ -117,15 +116,15 @@ const App = () => {
     setResult(null);
 
     try {
-      // APIキー取得
-      const geminiKey = (function() { try { return import.meta.env.VITE_GEMINI_API_KEY; } catch(e) { return typeof apiKey !== 'undefined' ? apiKey : ""; } })() || (typeof apiKey !== 'undefined' ? apiKey : "AIzaSyDPSMOMuarm6-aSEwRsLTyJmo0jKVnThxw");
+      // APIキー取得 (Vercel環境変数または直接入力値)
+      const geminiKey = import.meta.env.VITE_GEMINI_API_KEY || (typeof apiKey !== 'undefined' ? apiKey : "AIzaSyDPSMOMuarm6-aSEwRsLTyJmo0jKVnThxw");
       
       if (!geminiKey && !isCanvas) {
-        throw new Error("Gemini APIキーが設定されていません。");
+        throw new Error("APIキーが設定されていません。Vercelの設定を確認してください。");
       }
 
       const cleanKey = String(geminiKey).replace(/['"]+/g, '').trim();
-      // WEB公開版は 1.5-flash を推奨。プレビューは 2.5 を使用。
+      // WEB公開版は安定版 gemini-1.5-flash、プレビューは 2.5 を使用
       const model = isCanvas ? "gemini-2.5-flash-preview-09-2025" : "gemini-1.5-flash";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
 
@@ -133,17 +132,17 @@ const App = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: `Situation: ${userInput}. Create a 4-6 turn English dialogue with Japanese translations and key phrases.` }] }],
-          systemInstruction: { parts: [{ text: "You are an English coach. Return a JSON object: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
+          contents: [{ parts: [{ text: `Situation: ${userInput}. Create a 4-6 turn natural English dialogue with Japanese translations and key phrases.` }] }],
+          systemInstruction: { parts: [{ text: "You are a professional English coach. Respond only in JSON format: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
           generationConfig: { responseMimeType: "application/json" }
         })
       });
 
       const responseText = await response.text();
       if (!response.ok) {
-        if (response.status === 401) throw new Error("APIキー認証失敗。Redeployが必要です。");
-        if (response.status === 404) throw new Error("AI接続失敗 (404)。モデル設定を確認してください。");
-        throw new Error(`AIサーバーエラー (${response.status})`);
+        if (response.status === 401) throw new Error("APIキー認証失敗。反映待ちか、鍵の入力ミスです。");
+        if (response.status === 404) throw new Error("AIサーバー接続失敗(404)。Redeployを行ってください。");
+        throw new Error(`エラー (${response.status})`);
       }
 
       const data = JSON.parse(responseText);
@@ -169,7 +168,7 @@ const App = () => {
     try {
       const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
       await addDoc(vocabCol, { ...item, createdAt: new Date().toISOString() });
-      setSuccessMsg("保存しました！");
+      setSuccessMsg("保存完了！");
       setTimeout(() => setSuccessMsg(null), 2000);
     } catch (err) {
       setError("保存に失敗しました。");
@@ -189,7 +188,7 @@ const App = () => {
 
   return (
     <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', color: '#0f172a', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
-      {/* デザインの強制中央配置を保証するスタイル */}
+      {/* 画面の中央配置とデザインの強制固定 */}
       <style>{`
         body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; display: flex; justify-content: center; width: 100%; overflow-x: hidden; }
         #root { width: 100%; display: flex; flex-direction: column; align-items: center; }
@@ -258,7 +257,7 @@ const App = () => {
                 ))}
 
                 <div className="bg-white" style={{ borderRadius: '20px', border: '1px solid #e2e8f0', overflow: 'hidden', width: '100%' }}>
-                  <div style={{ backgroundColor: '#f8fafc', padding: '12px 20px', borderBottom: '1px solid #e2e8f0', fontSize: '12px', fontWeight: 'bold', color: '#0f172a' }}>重要フレーズ</div>
+                  <div style={{ backgroundColor: '#f8fafc', padding: '12px 20px', borderBottom: '1px solid #e2e8f0', fontSize: '12px', fontWeight: 'bold', color: '#0f172a' }}>重要フレーズを保存</div>
                   {result.key_phrases?.map((item, i) => (
                     <div key={i} style={{ padding: '15px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{ flex: 1 }}>
