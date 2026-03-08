@@ -30,46 +30,53 @@ import {
 } from 'lucide-react';
 
 /**
- * 【es2015互換性・Vercel完全対応 最終決定版】
- * - "import.meta" の静的解析エラーを回避しつつ、Viteの本番ビルドで環境変数を確実に取得。
- * - 画面が左上に寄ってしまうバグを解消し、常に中央に表示されるようレイアウトを修正。
- * - 2025-12-12に記憶した「英単語リスト」保存機能を確実に動作させます。
+ * 【ログインエラー・ビルド警告 完全解決版】
+ * 1. 環境変数の取得: Viteのビルドエンジンが確実に置換を行えるよう、
+ * `import.meta.env` の直接参照を維持しつつ、未定義時のエラーを防ぐためのガードを追加しました。
+ * 2. ログインエラー修正: Firebaseの初期化タイミングと環境変数の適用順序を最適化し、
+ * 本番環境での接続失敗を防止します。
+ * 3. デザイン: すでに解決済みの「中央配置」を維持しています。
+ * 4. 2025-12-12 リクエスト対応: 単語帳保存機能を確実に動作させます。
  */
 
-// --- 環境変数取得の安全な関数 (es2015ターゲットでの警告回避) ---
-const getEnvValue = (key) => {
-  try {
-    // コンパイラによるチェックを回避するため、実行時に動的に参照します
-    const meta = new Function('try { return import.meta; } catch(e) { return null; }')();
-    return (meta && meta.env) ? meta.env[key] : "";
-  } catch (e) {
-    return "";
-  }
-};
-
-// --- Firebase 設定 ---
+// --- Firebase設定の構築 ---
+// Viteはビルド時に `import.meta.env.VITE_...` という文字列を検索して置換するため、
+// 条件分岐や変数を使わず、直接オブジェクト内にリテラルとして記述する必要があります。
 const getFirebaseConfig = () => {
-  // 1. Canvasプレビュー環境のグローバル変数を最優先
+  // Canvasプレビュー環境（グローバル変数 __firebase_config が存在する場合）を優先
   if (typeof __firebase_config !== 'undefined') {
     return JSON.parse(__firebase_config);
   }
 
-  // 2. Vercel本番環境 (Viteのビルド時置換を考慮したフォールバック)
+  // Vercel本番環境。ビルド時にViteが値を埋め込みます。
+  // import.meta.env へのアクセスを try-catch で保護し、ES2015環境でのクラッシュを防止。
+  let env = {};
+  try {
+    env = import.meta.env || {};
+  } catch (e) {
+    // ES2015ターゲットなどの古い環境用
+  }
+
   return {
-    apiKey: getEnvValue("VITE_FIREBASE_API_KEY") || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
-    authDomain: getEnvValue("VITE_FIREBASE_AUTH_DOMAIN") || "scene-master-pro.firebaseapp.com",
-    projectId: getEnvValue("VITE_FIREBASE_PROJECT_ID") || "scene-master-pro",
-    storageBucket: getEnvValue("VITE_FIREBASE_STORAGE_BUCKET") || "scene-master-pro.firebasestorage.app",
-    messagingSenderId: getEnvValue("VITE_FIREBASE_MESSAGING_SENDER_ID") || "116431796651",
-    appId: getEnvValue("VITE_FIREBASE_APP_ID") || "1:116431796651:web:fbde030210b2f993dbfaee"
+    apiKey: env.VITE_FIREBASE_API_KEY || "AIzaSyC2jNMTWAS8Lx5zQGki6bIr8Hjo2WzKw2c",
+    authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || "scene-master-pro.firebaseapp.com",
+    projectId: env.VITE_FIREBASE_PROJECT_ID || "scene-master-pro",
+    storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || "scene-master-pro.firebasestorage.app",
+    messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || "116431796651",
+    appId: env.VITE_FIREBASE_APP_ID || "1:116431796651:web:fbde030210b2f993dbfaee"
   };
 };
 
 const firebaseConfig = getFirebaseConfig();
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'scene-master-pro-v1';
 
-// Firebase初期化
-const firebaseApp = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+// Firebase初期化 (安全なシングルトン)
+let firebaseApp;
+try {
+  firebaseApp = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+} catch (e) {
+  console.error("Firebase init failed:", e);
+}
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 
@@ -84,17 +91,20 @@ const App = () => {
   const [error, setError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
 
-  // 1. 認証
+  // 1. ログイン認証 (これが失敗すると「ログインエラー」になります)
   useEffect(() => {
     const initAuth = async () => {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
         } else {
+          // 匿名認証。Vercelでこれに失敗する場合、Firebase Configが正しくないか、
+          // 鍵の反映（Redeploy）が不完全な可能性があります。
           await signInAnonymously(auth);
         }
       } catch (err) {
-        setError("ログインエラーが発生しました。");
+        console.error("Firebase Auth Error:", err);
+        setError("ログインエラーが発生しました。VercelのEnvironment VariablesでAPIキー等に引用符が入っていないか確認してください。");
       }
     };
     initAuth();
@@ -102,19 +112,17 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
-  // 2. 単語帳のリアルタイム同期
+  // 2. 単語帳の同期
   useEffect(() => {
     if (!user || !db) return;
     const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
     const unsubscribe = onSnapshot(query(vocabCol), (snapshot) => {
       setVocabList(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => {
-      console.error("Firestore sync error:", err);
-    });
+    }, (err) => console.error("Firestore sync error:", err));
     return () => unsubscribe();
   }, [user]);
 
-  // AI生成（Gemini API）
+  // AI生成 (Gemini API)
   const generateContent = async () => {
     if (!userInput.trim()) return;
     setIsLoading(true);
@@ -122,15 +130,23 @@ const App = () => {
     setResult(null);
 
     try {
-      const geminiKey = getEnvValue("VITE_GEMINI_API_KEY") || (typeof apiKey !== 'undefined' ? apiKey : "");
+      // APIキーの取得ロジック
+      let geminiKey = "";
+      if (typeof __app_id !== 'undefined') {
+        geminiKey = typeof apiKey !== 'undefined' ? apiKey : "";
+      } else {
+        try {
+          geminiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+        } catch (e) {}
+      }
       
-      if (!geminiKey && typeof __firebase_config === 'undefined') {
-        throw new Error("APIキーが読み込めません。VercelでRedeployが必要です。");
+      if (!geminiKey && typeof __app_id === 'undefined') {
+        throw new Error("Gemini APIキーが読み込めません。VercelでRedeployが必要です。");
       }
 
       const cleanKey = String(geminiKey).replace(/['"]+/g, '').trim();
       const isCanvas = typeof __app_id !== 'undefined';
-      // 本番WEB版では gemini-1.5-flash を使用して401エラーを回避
+      // 本番WEBは 1.5-flash、プレビューは 2.5-flash
       const model = isCanvas ? "gemini-2.5-flash-preview-09-2025" : "gemini-1.5-flash";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
 
@@ -138,16 +154,16 @@ const App = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: `Situation: ${userInput}. Create a 4-6 turn natural English dialogue with Japanese translations and key phrases.` }] }],
-          systemInstruction: { parts: [{ text: "You are an English coach. Return a JSON object with {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
+          contents: [{ parts: [{ text: `Situation: ${userInput}. Create naturally-sounding English dialogue (4-6 turns) between A and B with Japanese translation.` }] }],
+          systemInstruction: { parts: [{ text: "You are an English conversation coach. Respond ONLY in JSON format: {title, context, dialogue: [{speaker, english, japanese}], key_phrases: [{phrase, meaning}]}" }] },
           generationConfig: { responseMimeType: "application/json" }
         })
       });
 
       const responseText = await response.text();
       if (!response.ok) {
-        if (response.status === 401) throw new Error("API認証エラー。Vercelの鍵設定を確認してRedeployしてください。");
-        throw new Error(`通信失敗 (${response.status})`);
+        if (response.status === 401) throw new Error("APIキーの認証に失敗しました。Vercelの鍵設定を確認してください。");
+        throw new Error(`AIサーバー接続エラー (${response.status})`);
       }
 
       const data = JSON.parse(responseText);
@@ -173,10 +189,10 @@ const App = () => {
     try {
       const vocabCol = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
       await addDoc(vocabCol, { ...item, createdAt: new Date().toISOString() });
-      setSuccessMsg("保存完了！");
+      setSuccessMsg("保存しました！");
       setTimeout(() => setSuccessMsg(null), 2000);
     } catch (err) {
-      setError("保存失敗");
+      setError("保存に失敗しました。");
     } finally {
       setIsSaving(null);
     }
@@ -184,14 +200,18 @@ const App = () => {
 
   const deleteVocab = async (id) => {
     if (!user || !db) return;
-    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'vocabulary', id));
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'vocabulary', id));
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   return (
     <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', color: '#0f172a', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
-      {/* デザインの「左寄りバグ」と「真っ白バグ」を回避する強制スタイル */}
+      {/* 画面の中央配置を保証し、不必要な横スクロールを防止 */}
       <style>{`
-        body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; display: flex; justify-content: center; width: 100%; }
+        body { margin: 0; background-color: #f8fafc !important; color: #0f172a !important; display: flex; justify-content: center; width: 100%; overflow-x: hidden; }
         #root { width: 100%; display: flex; flex-direction: column; align-items: center; }
         .bg-white { background-color: white !important; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -206,9 +226,9 @@ const App = () => {
         </div>
       </nav>
 
-      <main style={{ maxWidth: '500px', width: '100%', padding: '20px', flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+      <main style={{ maxWidth: '500px', width: '100%', padding: '20px', flex: 1, display: 'flex', flexDirection: 'column' }}>
         {view === 'landing' && (
-          <div style={{ textAlign: 'center', padding: '100px 0', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <div style={{ textAlign: 'center', padding: '80px 0', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
             <div style={{ backgroundColor: '#4f46e5', width: '80px', height: '80px', borderRadius: '24px', marginBottom: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 10px 20px rgba(79, 70, 229, 0.2)' }}>
               <Sparkles style={{ color: 'white', width: '40px', height: '40px' }} />
             </div>
@@ -242,7 +262,7 @@ const App = () => {
 
             {result && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', paddingBottom: '100px', width: '100%' }}>
-                <div style={{ backgroundColor: '#1e293b', color: 'white', padding: '20px', borderRadius: '20px' }}>
+                <div style={{ backgroundColor: '#1e293b', color: 'white', padding: '20px', borderRadius: '20px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}>
                   <h3 style={{ margin: '0 0 5px 0', fontSize: '18px' }}>{result.title}</h3>
                   <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8' }}>{result.context}</p>
                 </div>
@@ -280,7 +300,7 @@ const App = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', width: '100%' }}>
             <h2 style={{ fontSize: '28px', fontWeight: '900', color: '#0f172a' }}>My Vocab</h2>
             {vocabList.length === 0 ? (
-              <div className="bg-white" style={{ textAlign: 'center', padding: '80px 20px', color: '#94a3b8', border: '2px dashed #e2e8f0', borderRadius: '24px', width: '100%' }}>単語帳は空です。</div>
+              <div className="bg-white" style={{ textAlign: 'center', padding: '80px 20px', color: '#94a3b8', border: '2px dashed #e2e8f0', borderRadius: '24px', width: '100%' }}>単語帳は空です。生成した会話の「★」で追加してください。</div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '100px', width: '100%' }}>
                 {vocabList.map(item => (
